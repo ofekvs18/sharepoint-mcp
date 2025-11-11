@@ -205,11 +205,10 @@ class SharePointMCP {
   }
 
   async authenticateSharePoint(args) {
-    const {
-      clientId = DEFAULT_CLIENT_ID,
-      tenantId = DEFAULT_TENANT_ID,
-      redirectUri = "http://localhost:3000/callback"
-    } = args;
+    // Handle empty strings by treating them as undefined
+    const clientId = args.clientId?.trim() || DEFAULT_CLIENT_ID;
+    const tenantId = args.tenantId?.trim() || DEFAULT_TENANT_ID;
+    const redirectUri = args.redirectUri?.trim() || "http://localhost:3000/callback";
 
     // Close any existing auth server first
     if (this.activeAuthServer) {
