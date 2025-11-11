@@ -7,15 +7,19 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
-import express from "express";
 import open from "open";
 
-// SharePoint MCP Server
+// Default public Azure AD client ID (Microsoft Graph Explorer)
+// This allows testing without setting up your own Azure AD app
+const DEFAULT_CLIENT_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
+const DEFAULT_TENANT_ID = "common"; // Multi-tenant, works for any Microsoft 365 account
+
+// OneDrive MCP Server
 class SharePointMCP {
   constructor() {
     this.server = new Server(
       {
-        name: "sharepoint-mcp",
+        name: "onedrive-mcp",
         version: "1.0.0",
       },
       {
@@ -30,7 +34,6 @@ class SharePointMCP {
       accessToken: null,
       refreshToken: null,
       expiresAt: null,
-      siteUrl: null,
     };
 
     this.setupHandlers();
@@ -43,58 +46,32 @@ class SharePointMCP {
         {
           name: "authenticate_sharepoint",
           description:
-            "Authenticate with SharePoint using OAuth 2.0. Opens a browser for user login and stores access token.",
+            "Authenticate with SharePoint using OAuth 2.0 Device Code Flow. Shows a code to enter at microsoft.com/devicelogin. No Azure AD setup required - uses default public client ID for testing! No admin consent needed.",
           inputSchema: {
             type: "object",
             properties: {
               clientId: {
                 type: "string",
-                description: "Azure AD Application (client) ID",
+                description: "Azure AD Application (client) ID (optional - uses public default if not provided)",
               },
               tenantId: {
                 type: "string",
-                description: "Azure AD Tenant ID",
-              },
-              redirectUri: {
-                type: "string",
-                description: "Redirect URI (default: http://localhost:3000/callback)",
-                default: "http://localhost:3000/callback",
+                description: "Azure AD Tenant ID (optional - uses 'common' if not provided, works for any Microsoft 365 account)",
               },
             },
-            required: ["clientId", "tenantId"],
+            required: [],
           },
         },
         {
-          name: "set_site_url",
+          name: "search_my_files",
           description:
-            "Set the SharePoint site URL to work with (e.g., https://yourtenant.sharepoint.com/sites/yoursite)",
-          inputSchema: {
-            type: "object",
-            properties: {
-              siteUrl: {
-                type: "string",
-                description: "Full SharePoint site URL",
-              },
-            },
-            required: ["siteUrl"],
-          },
-        },
-        {
-          name: "search_files",
-          description:
-            "Search for files in SharePoint by filename or content using Microsoft Graph API",
+            "Search for files in your OneDrive by filename or content",
           inputSchema: {
             type: "object",
             properties: {
               query: {
                 type: "string",
                 description: "Search query string",
-              },
-              searchType: {
-                type: "string",
-                enum: ["filename", "content", "both"],
-                description: "Type of search to perform",
-                default: "both",
               },
               maxResults: {
                 type: "number",
@@ -106,21 +83,21 @@ class SharePointMCP {
           },
         },
         {
-          name: "get_folder_structure",
+          name: "list_my_files",
           description:
-            "Get the folder structure of a SharePoint site or specific folder path",
+            "List files and folders in your OneDrive (optionally in a specific folder)",
           inputSchema: {
             type: "object",
             properties: {
               folderPath: {
                 type: "string",
-                description: "Relative folder path (leave empty for root)",
+                description: "Folder path (leave empty for root/recent files)",
                 default: "",
               },
-              depth: {
+              limit: {
                 type: "number",
-                description: "Depth of folder traversal (1-5)",
-                default: 2,
+                description: "Number of items to return",
+                default: 20,
               },
             },
           },
@@ -128,7 +105,7 @@ class SharePointMCP {
         {
           name: "get_file_content",
           description:
-            "Retrieve the content of a specific file from SharePoint",
+            "Retrieve the content of a specific file from your OneDrive",
           inputSchema: {
             type: "object",
             properties: {
@@ -136,17 +113,14 @@ class SharePointMCP {
                 type: "string",
                 description: "File ID from search results",
               },
-              filePath: {
-                type: "string",
-                description: "Alternate: full file path",
-              },
             },
+            required: ["fileId"],
           },
         },
         {
           name: "list_recent_files",
           description:
-            "List recently modified files in the SharePoint site",
+            "List your recently accessed or modified files in OneDrive",
           inputSchema: {
             type: "object",
             properties: {
@@ -169,12 +143,10 @@ class SharePointMCP {
         switch (name) {
           case "authenticate_sharepoint":
             return await this.authenticateSharePoint(args);
-          case "set_site_url":
-            return await this.setSiteUrl(args);
-          case "search_files":
-            return await this.searchFiles(args);
-          case "get_folder_structure":
-            return await this.getFolderStructure(args);
+          case "search_my_files":
+            return await this.searchMyFiles(args);
+          case "list_my_files":
+            return await this.listMyFiles(args);
           case "get_file_content":
             return await this.getFileContent(args);
           case "list_recent_files":
@@ -197,55 +169,77 @@ class SharePointMCP {
   }
 
   async authenticateSharePoint(args) {
-    const { clientId, tenantId, redirectUri = "http://localhost:3000/callback" } = args;
+    // Handle empty strings by treating them as undefined
+    const clientId = args.clientId?.trim() || DEFAULT_CLIENT_ID;
+    const tenantId = args.tenantId?.trim() || DEFAULT_TENANT_ID;
 
-    return new Promise((resolve, reject) => {
-      const app = express();
-      let server;
+    // Use Device Code Flow - no redirect URI needed!
+    // This is perfect for local testing and CLI apps
+    const deviceCodeUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/devicecode`;
+    const tokenUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
 
-      // OAuth endpoints
-      const authUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize`;
-      const tokenUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
+    // Scopes that don't require admin consent
+    const scopes = [
+      "User.Read",
+      "Files.Read",
+      "offline_access",
+    ].join(" ");
 
-      // Scopes needed for SharePoint access
-      const scopes = [
-        "Sites.Read.All",
-        "Files.Read.All",
-        "offline_access",
-      ].join(" ");
-
-      // Build authorization URL
-      const authParams = new URLSearchParams({
-        client_id: clientId,
-        response_type: "code",
-        redirect_uri: redirectUri,
-        scope: scopes,
-        response_mode: "query",
-      });
-
-      const fullAuthUrl = `${authUrl}?${authParams}`;
-
-      // Handle OAuth callback
-      app.get("/callback", async (req, res) => {
-        const { code, error } = req.query;
-
-        if (error) {
-          res.send(`<h1>Authentication failed: ${error}</h1>`);
-          server.close();
-          reject(new Error(`Authentication failed: ${error}`));
-          return;
+    try {
+      // Step 1: Request device code
+      const deviceCodeResponse = await axios.post(
+        deviceCodeUrl,
+        new URLSearchParams({
+          client_id: clientId,
+          scope: scopes,
+        }),
+        {
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
         }
+      );
+
+      const {
+        device_code,
+        user_code,
+        verification_uri,
+        expires_in,
+        interval = 5,
+        message,
+      } = deviceCodeResponse.data;
+
+      console.error("\n=== SharePoint Authentication ===");
+      if (clientId === DEFAULT_CLIENT_ID) {
+        console.error("Using default public client ID (no Azure AD setup needed!)");
+      }
+      console.error("\nTo sign in, use a web browser to open the page:");
+      console.error(`  ${verification_uri}`);
+      console.error("\nAnd enter the code:");
+      console.error(`  ${user_code}`);
+      console.error("\nWaiting for you to authenticate...");
+      console.error("================================\n");
+
+      // Try to open the browser automatically
+      try {
+        await open(verification_uri);
+      } catch (err) {
+        // Silent fail - user can open manually
+      }
+
+      // Step 2: Poll for token
+      const pollUntil = Date.now() + expires_in * 1000;
+
+      while (Date.now() < pollUntil) {
+        await new Promise(resolve => setTimeout(resolve, interval * 1000));
 
         try {
-          // Exchange code for tokens
           const tokenResponse = await axios.post(
             tokenUrl,
             new URLSearchParams({
               client_id: clientId,
-              scope: scopes,
-              code: code,
-              redirect_uri: redirectUri,
-              grant_type: "authorization_code",
+              grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+              device_code: device_code,
             }),
             {
               headers: {
@@ -261,63 +255,52 @@ class SharePointMCP {
           this.authTokens.refreshToken = refresh_token;
           this.authTokens.expiresAt = Date.now() + expires_in * 1000;
 
-          res.send(`
-            <h1>Authentication Successful!</h1>
-            <p>You can close this window and return to your application.</p>
-            <script>setTimeout(() => window.close(), 2000);</script>
-          `);
+          console.error("\n✅ Authentication successful!\n");
 
-          server.close();
+          const successMessage = clientId === DEFAULT_CLIENT_ID
+            ? "Successfully authenticated with OneDrive using default public client ID! 🎉\n\n" +
+              "Access token stored in memory.\n\n" +
+              "You can now:\n" +
+              "- Search your files: 'search_my_files'\n" +
+              "- List files: 'list_my_files'\n" +
+              "- See recent files: 'list_recent_files'"
+            : "Successfully authenticated with OneDrive! Access token stored.";
 
-          resolve({
+          return {
             content: [
               {
                 type: "text",
-                text: "Successfully authenticated with SharePoint! Access token stored. Use 'set_site_url' to specify your SharePoint site.",
+                text: successMessage,
               },
             ],
-          });
-        } catch (error) {
-          res.send(`<h1>Token exchange failed</h1>`);
-          server.close();
-          reject(error);
+          };
+        } catch (pollError) {
+          // Check for specific errors
+          const errorCode = pollError.response?.data?.error;
+
+          if (errorCode === "authorization_pending") {
+            // User hasn't completed auth yet, continue polling
+            continue;
+          } else if (errorCode === "slow_down") {
+            // Need to slow down polling
+            await new Promise(resolve => setTimeout(resolve, interval * 1000));
+            continue;
+          } else if (errorCode === "authorization_declined") {
+            throw new Error("Authentication was declined by user");
+          } else if (errorCode === "expired_token") {
+            throw new Error("Authentication code expired. Please try again.");
+          } else {
+            // Unknown error, rethrow
+            throw pollError;
+          }
         }
-      });
+      }
 
-      // Start server
-      server = app.listen(3000, async () => {
-        console.log("Opening browser for authentication...");
-        await open(fullAuthUrl);
-      });
-
-      // Timeout after 5 minutes
-      setTimeout(() => {
-        server.close();
-        reject(new Error("Authentication timeout"));
-      }, 300000);
-    });
-  }
-
-  async setSiteUrl(args) {
-    const { siteUrl } = args;
-
-    // Validate URL format
-    if (!siteUrl.startsWith("https://") || !siteUrl.includes(".sharepoint.com")) {
-      throw new Error(
-        "Invalid SharePoint URL. Expected format: https://yourtenant.sharepoint.com/sites/yoursite"
-      );
+      throw new Error("Authentication timeout - please try again");
+    } catch (error) {
+      const errorMessage = error.response?.data?.error_description || error.message;
+      throw new Error(`Authentication failed: ${errorMessage}`);
     }
-
-    this.authTokens.siteUrl = siteUrl;
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: `SharePoint site URL set to: ${siteUrl}`,
-        },
-      ],
-    };
   }
 
   async ensureAuthenticated() {
@@ -331,45 +314,31 @@ class SharePointMCP {
     }
   }
 
-  async ensureSiteUrl() {
-    if (!this.authTokens.siteUrl) {
-      throw new Error("Site URL not set. Please run 'set_site_url' first.");
-    }
-  }
-
-  async searchFiles(args) {
+  async searchMyFiles(args) {
     await this.ensureAuthenticated();
-    await this.ensureSiteUrl();
 
-    const { query, searchType = "both", maxResults = 20 } = args;
-
-    // Build search query
-    let searchQuery = query;
-    if (searchType === "filename") {
-      searchQuery = `filename:${query}`;
-    } else if (searchType === "content") {
-      searchQuery = `"${query}"`;
-    }
+    const { query, maxResults = 20 } = args;
 
     try {
-      const response = await axios.get(
+      // Search in user's OneDrive
+      const response = await axios.post(
         "https://graph.microsoft.com/v1.0/search/query",
+        {
+          requests: [
+            {
+              entityTypes: ["driveItem"],
+              query: {
+                queryString: query,
+              },
+              from: 0,
+              size: maxResults,
+            },
+          ],
+        },
         {
           headers: {
             Authorization: `Bearer ${this.authTokens.accessToken}`,
             "Content-Type": "application/json",
-          },
-          data: {
-            requests: [
-              {
-                entityTypes: ["driveItem"],
-                query: {
-                  queryString: searchQuery,
-                },
-                from: 0,
-                size: maxResults,
-              },
-            ],
           },
         }
       );
@@ -391,7 +360,7 @@ class SharePointMCP {
             type: "text",
             text: JSON.stringify(
               {
-                query: searchQuery,
+                query: query,
                 resultCount: files.length,
                 files: files,
               },
@@ -406,94 +375,38 @@ class SharePointMCP {
     }
   }
 
-  async getFolderStructure(args) {
+  async listMyFiles(args) {
     await this.ensureAuthenticated();
-    await this.ensureSiteUrl();
 
-    const { folderPath = "", depth = 2 } = args;
-
-    // Extract site info from URL
-    const siteUrl = new URL(this.authTokens.siteUrl);
-    const pathParts = siteUrl.pathname.split("/").filter((p) => p);
-
-    if (pathParts[0] !== "sites" || !pathParts[1]) {
-      throw new Error("Invalid site URL format");
-    }
-
-    const siteName = pathParts[1];
+    const { folderPath = "", limit = 20 } = args;
 
     try {
-      // Get site ID
-      const siteResponse = await axios.get(
-        `https://graph.microsoft.com/v1.0/sites/${siteUrl.hostname}:/sites/${siteName}`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.authTokens.accessToken}`,
-          },
-        }
-      );
+      // If no folder path, get recent files
+      let endpoint;
+      if (!folderPath) {
+        endpoint = "https://graph.microsoft.com/v1.0/me/drive/recent";
+      } else {
+        endpoint = `https://graph.microsoft.com/v1.0/me/drive/root:/${folderPath}:/children`;
+      }
 
-      const siteId = siteResponse.data.id;
+      const response = await axios.get(endpoint, {
+        headers: {
+          Authorization: `Bearer ${this.authTokens.accessToken}`,
+        },
+        params: {
+          $top: limit,
+        },
+      });
 
-      // Get drive
-      const driveResponse = await axios.get(
-        `https://graph.microsoft.com/v1.0/sites/${siteId}/drive`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.authTokens.accessToken}`,
-          },
-        }
-      );
-
-      const driveId = driveResponse.data.id;
-
-      // Recursive function to get folder structure
-      const getFolders = async (path, currentDepth) => {
-        if (currentDepth > depth) return null;
-
-        const endpoint = path
-          ? `https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${path}:/children`
-          : `https://graph.microsoft.com/v1.0/drives/${driveId}/root/children`;
-
-        const response = await axios.get(endpoint, {
-          headers: {
-            Authorization: `Bearer ${this.authTokens.accessToken}`,
-          },
-        });
-
-        const items = response.data.value;
-        const structure = [];
-
-        for (const item of items) {
-          if (item.folder) {
-            const children =
-              currentDepth < depth
-                ? await getFolders(
-                    path ? `${path}/${item.name}` : item.name,
-                    currentDepth + 1
-                  )
-                : null;
-
-            structure.push({
-              name: item.name,
-              type: "folder",
-              itemCount: item.folder.childCount,
-              children: children,
-            });
-          } else {
-            structure.push({
-              name: item.name,
-              type: "file",
-              size: item.size,
-              lastModified: item.lastModifiedDateTime,
-            });
-          }
-        }
-
-        return structure;
-      };
-
-      const structure = await getFolders(folderPath, 1);
+      const items = response.data.value || [];
+      const files = items.map((item) => ({
+        id: item.id,
+        name: item.name,
+        type: item.folder ? "folder" : "file",
+        size: item.size,
+        lastModified: item.lastModifiedDateTime,
+        webUrl: item.webUrl,
+      }));
 
       return {
         content: [
@@ -501,10 +414,9 @@ class SharePointMCP {
             type: "text",
             text: JSON.stringify(
               {
-                siteName: siteName,
-                rootPath: folderPath || "root",
-                depth: depth,
-                structure: structure,
+                path: folderPath || "recent files",
+                count: files.length,
+                items: files,
               },
               null,
               2
@@ -513,9 +425,7 @@ class SharePointMCP {
         ],
       };
     } catch (error) {
-      throw new Error(
-        `Failed to get folder structure: ${error.response?.data?.error?.message || error.message}`
-      );
+      throw new Error(`Failed to list files: ${error.response?.data?.error?.message || error.message}`);
     }
   }
 
@@ -530,7 +440,7 @@ class SharePointMCP {
 
     try {
       const response = await axios.get(
-        `https://graph.microsoft.com/v1.0/drives/items/${fileId}/content`,
+        `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/content`,
         {
           headers: {
             Authorization: `Bearer ${this.authTokens.accessToken}`,
@@ -556,54 +466,31 @@ class SharePointMCP {
 
   async listRecentFiles(args) {
     await this.ensureAuthenticated();
-    await this.ensureSiteUrl();
 
     const { limit = 10 } = args;
 
-    const siteUrl = new URL(this.authTokens.siteUrl);
-    const pathParts = siteUrl.pathname.split("/").filter((p) => p);
-    const siteName = pathParts[1];
-
     try {
-      const siteResponse = await axios.get(
-        `https://graph.microsoft.com/v1.0/sites/${siteUrl.hostname}:/sites/${siteName}`,
+      const response = await axios.get(
+        "https://graph.microsoft.com/v1.0/me/drive/recent",
         {
           headers: {
             Authorization: `Bearer ${this.authTokens.accessToken}`,
           },
-        }
-      );
-
-      const siteId = siteResponse.data.id;
-
-      const driveResponse = await axios.get(
-        `https://graph.microsoft.com/v1.0/sites/${siteId}/drive`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.authTokens.accessToken}`,
+          params: {
+            $top: limit,
           },
         }
       );
 
-      const driveId = driveResponse.data.id;
-
-      const filesResponse = await axios.get(
-        `https://graph.microsoft.com/v1.0/drives/${driveId}/root/children?$orderby=lastModifiedDateTime desc&$top=${limit}`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.authTokens.accessToken}`,
-          },
-        }
-      );
-
-      const files = filesResponse.data.value
+      const items = response.data.value || [];
+      const files = items
         .filter((item) => !item.folder)
         .map((item) => ({
           id: item.id,
           name: item.name,
           size: item.size,
           lastModified: item.lastModifiedDateTime,
-          author: item.lastModifiedBy?.user?.displayName,
+          lastAccessed: item.lastAccessedDateTime,
           webUrl: item.webUrl,
         }));
 
@@ -632,7 +519,7 @@ class SharePointMCP {
   async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error("SharePoint MCP server running on stdio");
+    console.error("OneDrive MCP server running on stdio");
   }
 }
 

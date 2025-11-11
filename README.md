@@ -19,15 +19,26 @@ A Model Context Protocol (MCP) server that enables AI assistants like Claude to 
 
 ## Quick Start
 
-See **[START_HERE.md](./START_HERE.md)** for complete setup instructions.
+### 🚀 NEW: Local Testing (No Azure Setup!)
 
-### TL;DR
+Want to test immediately without Azure AD setup? See **[LOCAL_SETUP.md](./LOCAL_SETUP.md)**
 
+**TL;DR for local testing:**
+1. `npm install`
+2. Configure Claude Desktop config file
+3. In Claude: "Authenticate with SharePoint" (no Client ID needed!)
+4. Set your site URL and start searching
+
+### 📚 Full Production Setup
+
+See **[START_HERE.md](./START_HERE.md)** for complete setup instructions with your own Azure AD app.
+
+**TL;DR for production:**
 1. Register an Azure AD app and get Client ID + Tenant ID
 2. `npm install`
 3. Configure Claude Desktop config file
 4. Restart Claude
-5. Authenticate through Claude
+5. Authenticate through Claude with your credentials
 
 Full instructions in [START_HERE.md](./START_HERE.md)
 
