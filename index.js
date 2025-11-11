@@ -85,7 +85,7 @@ class SharePointMCP {
               },
               searchDepth: {
                 type: "string",
-                description: "Search depth: 'filename' (fast, names only), 'content' (comprehensive, searches inside all files including Office docs with text extraction), 'auto' (uses Graph Search API, best for enterprise accounts)",
+                description: "Search depth: 'filename' (fast, names only), 'content' (downloads and searches file contents - best for code/text files, limited for Office docs), 'auto' (RECOMMENDED for Office docs - uses Graph Search API)",
                 enum: ["filename", "content", "auto"],
                 default: "filename",
               },
@@ -405,38 +405,24 @@ class SharePointMCP {
   }
 
   // Helper: Extract text from Office document
-  async extractOfficeText(fileId, driveId = null) {
+  async extractOfficeText(fileId, driveId = null, filename = '') {
     try {
-      // Try to get preview which includes extracted text
-      const previewEndpoint = driveId
-        ? `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/preview`
-        : `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/preview`;
+      console.error(`Attempting to extract text from Office doc: ${filename}`);
 
-      const previewResponse = await axios.post(
-        previewEndpoint,
-        { viewer: 'onedrive', chromeless: true },
-        {
-          headers: {
-            Authorization: `Bearer ${this.authTokens.accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 15000,
-        }
-      );
-
-      // Preview API returns a getUrl that we can use, but we'll try direct content conversion
-      // Try to get document as HTML which extracts text
+      // Method 1: Try HTML conversion (works for some accounts)
       const htmlEndpoint = driveId
         ? `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/content?format=html`
         : `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/content?format=html`;
 
       try {
+        console.error(`  Trying HTML conversion for ${filename}...`);
         const htmlResponse = await axios.get(htmlEndpoint, {
           headers: {
             Authorization: `Bearer ${this.authTokens.accessToken}`,
           },
           responseType: 'text',
           timeout: 20000,
+          validateStatus: (status) => status === 200, // Only accept 200
         });
 
         // Strip HTML tags to get plain text
@@ -445,16 +431,52 @@ class SharePointMCP {
           .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
           .replace(/<[^>]+>/g, ' ')
           .replace(/&nbsp;/g, ' ')
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;/g, "'")
           .replace(/&[a-z]+;/g, ' ')
           .replace(/\s+/g, ' ')
           .trim();
 
-        return text;
+        if (text && text.length > 10) {
+          console.error(`  ✓ Successfully extracted ${text.length} chars from ${filename}`);
+          return text;
+        }
       } catch (htmlError) {
-        // HTML conversion not available, return empty
-        return '';
+        console.error(`  ✗ HTML conversion failed for ${filename}: ${htmlError.response?.status || htmlError.message}`);
       }
+
+      // Method 2: Try getting file metadata with description (sometimes contains indexed text)
+      const metadataEndpoint = driveId
+        ? `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}?$select=name,description,file`
+        : `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}?$select=name,description,file`;
+
+      try {
+        console.error(`  Trying metadata extraction for ${filename}...`);
+        const metadataResponse = await axios.get(metadataEndpoint, {
+          headers: {
+            Authorization: `Bearer ${this.authTokens.accessToken}`,
+          },
+          timeout: 10000,
+        });
+
+        const description = metadataResponse.data.description;
+        if (description && description.length > 0) {
+          console.error(`  ✓ Found description text (${description.length} chars) for ${filename}`);
+          return description;
+        }
+      } catch (metadataError) {
+        console.error(`  ✗ Metadata extraction failed for ${filename}`);
+      }
+
+      // If all methods fail, return empty (file will be skipped)
+      console.error(`  ✗ All extraction methods failed for ${filename}`);
+      return '';
+
     } catch (error) {
+      console.error(`  ✗ Error extracting text from ${filename}: ${error.message}`);
       return '';
     }
   }
@@ -467,11 +489,11 @@ class SharePointMCP {
       // Check if this is an Office document
       if (filename && this.isOfficeDocument(filename)) {
         // Use Office text extraction
-        content = await this.extractOfficeText(fileId, driveId);
+        content = await this.extractOfficeText(fileId, driveId, filename);
 
         if (!content) {
-          // Text extraction failed, skip this file
-          return { found: false, error: 'Could not extract text from Office document' };
+          // Text extraction failed, skip this file silently
+          return { found: false, error: 'Office text extraction not available for this file' };
         }
       } else {
         // Regular plain text file - download directly
@@ -725,7 +747,8 @@ class SharePointMCP {
     // Count Office documents that will be processed with text extraction
     const officeDocCount = files.filter(f => this.isOfficeDocument(f.name)).length;
     if (officeDocCount > 0) {
-      console.error(`ℹ️  Found ${officeDocCount} Office documents - will extract text for searching`);
+      console.error(`ℹ️  Found ${officeDocCount} Office documents - attempting text extraction`);
+      console.error(`   Note: Office text extraction has limited availability. For best results, use searchDepth="auto"`);
     }
 
     // Calculate relevance scores and sort by relevance
