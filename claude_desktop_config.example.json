@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "sharepoint": {
+      "command": "node",
+      "args": [
+        "/REPLACE/WITH/FULL/PATH/TO/sharepoint-mcp/index.js"
+      ]
+    }
+  }
+}
