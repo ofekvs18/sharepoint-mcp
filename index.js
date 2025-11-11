@@ -83,6 +83,19 @@ class SharePointMCP {
                 description: "Include files shared with you in search results",
                 default: false,
               },
+              searchDepth: {
+                type: "string",
+                description: "Search depth: 'filename' (fast, names only), 'content' (comprehensive, searches file contents), 'auto' (tries Graph API first, falls back to content search)",
+                enum: ["filename", "content", "auto"],
+                default: "filename",
+              },
+              fileTypes: {
+                type: "array",
+                description: "Filter by file extensions (e.g., ['txt', 'js', 'md']). Only applies to content search.",
+                items: {
+                  type: "string",
+                },
+              },
             },
             required: ["query"],
           },
@@ -358,83 +371,378 @@ class SharePointMCP {
     return fullPath;
   }
 
-  async searchMyFiles(args) {
-    await this.ensureAuthenticated();
+  // Helper: Check if file is searchable based on extension
+  isSearchableFile(filename, allowedTypes = null) {
+    const searchableExtensions = [
+      'txt', 'md', 'js', 'jsx', 'ts', 'tsx', 'json', 'xml', 'html', 'htm',
+      'css', 'scss', 'sass', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'php',
+      'rb', 'go', 'rs', 'sh', 'bash', 'yml', 'yaml', 'toml', 'ini', 'cfg',
+      'log', 'csv', 'sql', 'r', 'swift', 'kt', 'dart', 'vue', 'svelte'
+    ];
 
-    const { query, maxResults = 20, includeShared = false } = args;
+    const ext = filename.split('.').pop().toLowerCase();
 
+    // If specific file types are requested, check against those
+    if (allowedTypes && allowedTypes.length > 0) {
+      return allowedTypes.includes(ext);
+    }
+
+    return searchableExtensions.includes(ext);
+  }
+
+  // Helper: Download and search file content
+  async searchFileContent(fileId, query) {
     try {
-      // Use OneDrive Drive API search - works for both personal and work accounts
-      // The Microsoft Graph Search API (/search/query) only works for work accounts
       const response = await axios.get(
-        `https://graph.microsoft.com/v1.0/me/drive/root/search(q='${encodeURIComponent(query)}')`,
+        `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/content`,
+        {
+          headers: {
+            Authorization: `Bearer ${this.authTokens.accessToken}`,
+          },
+          responseType: 'text',
+          maxContentLength: 10 * 1024 * 1024, // Limit to 10MB
+        }
+      );
+
+      const content = response.data;
+      const queryLower = query.toLowerCase();
+
+      // Search for query in content (case-insensitive)
+      if (content.toLowerCase().includes(queryLower)) {
+        // Find context around matches
+        const lines = content.split('\n');
+        const matchingLines = [];
+
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].toLowerCase().includes(queryLower)) {
+            matchingLines.push({
+              lineNumber: i + 1,
+              content: lines[i].trim(),
+            });
+
+            // Limit to first 5 matches per file
+            if (matchingLines.length >= 5) break;
+          }
+        }
+
+        return {
+          found: true,
+          matches: matchingLines,
+          preview: matchingLines[0]?.content.substring(0, 200) || '',
+        };
+      }
+
+      return { found: false };
+    } catch (error) {
+      // If file is too large or binary, skip it
+      return { found: false, error: error.message };
+    }
+  }
+
+  // Helper: Try Microsoft Graph Search API (works for work accounts)
+  async searchWithGraphAPI(query, maxResults) {
+    try {
+      const response = await axios.post(
+        'https://graph.microsoft.com/v1.0/search/query',
+        {
+          requests: [
+            {
+              entityTypes: ['driveItem'],
+              query: {
+                queryString: query,
+              },
+              from: 0,
+              size: maxResults,
+            },
+          ],
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${this.authTokens.accessToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      const hits = response.data.value[0]?.hitsContainers[0]?.hits || [];
+
+      return {
+        success: true,
+        results: hits.map((hit) => {
+          const resource = hit.resource;
+          return {
+            id: resource.id,
+            name: resource.name,
+            path: this.constructFullPath(resource),
+            webUrl: resource.webUrl,
+            size: resource.size,
+            lastModified: resource.lastModifiedDateTime,
+            author: resource.createdBy?.user?.displayName,
+            type: resource.folder ? 'folder' : 'file',
+            source: 'graphSearch',
+            summary: hit.summary || '',
+            relevanceScore: hit.rank,
+          };
+        }),
+      };
+    } catch (error) {
+      // Graph Search API not available (personal account or insufficient permissions)
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Helper: Perform comprehensive content search
+  async searchWithContentAnalysis(query, maxResults, includeShared, fileTypes) {
+    const allResults = [];
+
+    // Get all files from user's drive
+    const driveResponse = await axios.get(
+      'https://graph.microsoft.com/v1.0/me/drive/root/children',
+      {
+        headers: {
+          Authorization: `Bearer ${this.authTokens.accessToken}`,
+        },
+        params: {
+          $top: 1000, // Get more files to search through
+        },
+      }
+    );
+
+    const files = driveResponse.data.value || [];
+
+    // Also get recent files for broader coverage
+    try {
+      const recentResponse = await axios.get(
+        'https://graph.microsoft.com/v1.0/me/drive/recent',
         {
           headers: {
             Authorization: `Bearer ${this.authTokens.accessToken}`,
           },
           params: {
-            $top: maxResults,
+            $top: 200,
           },
         }
       );
 
-      let items = response.data.value || [];
-      let allFiles = items.map((item) => ({
-        id: item.id,
-        name: item.name,
-        path: this.constructFullPath(item),
-        webUrl: item.webUrl,
-        size: item.size,
-        lastModified: item.lastModifiedDateTime,
-        author: item.createdBy?.user?.displayName,
-        type: item.folder ? "folder" : "file",
-        source: "myDrive",
-      }));
+      // Merge with existing files (deduplicate by id)
+      const recentFiles = recentResponse.data.value || [];
+      const fileIds = new Set(files.map(f => f.id));
 
-      // If includeShared is true, also search through shared files
-      if (includeShared) {
-        try {
-          const sharedResponse = await axios.get(
-            "https://graph.microsoft.com/v1.0/me/drive/sharedWithMe",
-            {
-              headers: {
-                Authorization: `Bearer ${this.authTokens.accessToken}`,
-              },
-              params: {
-                $top: 100, // Get more shared files to search through
-              },
-            }
-          );
+      for (const file of recentFiles) {
+        if (!fileIds.has(file.id)) {
+          files.push(file);
+          fileIds.add(file.id);
+        }
+      }
+    } catch (err) {
+      // Continue with just root files if recent fails
+    }
 
-          const sharedItems = sharedResponse.data.value || [];
-          // Filter shared items by query (simple name matching)
-          const matchingShared = sharedItems
-            .filter((item) =>
-              item.name.toLowerCase().includes(query.toLowerCase())
-            )
-            .slice(0, Math.floor(maxResults / 2)) // Limit shared results
-            .map((item) => {
-              // For shared items, use remoteItem if available
-              const itemToUse = item.remoteItem || item;
-              return {
-                id: item.remoteItem?.id || item.id,
-                name: item.name,
-                path: this.constructFullPath(itemToUse),
-                webUrl: item.remoteItem?.webUrl || item.webUrl,
-                size: item.size,
-                lastModified: item.lastModifiedDateTime,
-                author: item.remoteItem?.createdBy?.user?.displayName,
-                type: item.folder || item.remoteItem?.folder ? "folder" : "file",
-                source: "sharedWithMe",
-                sharedBy: item.remoteItem?.createdBy?.user?.displayName,
-              };
+    // Search through files
+    for (const file of files) {
+      if (file.folder) continue; // Skip folders
+
+      const fileName = file.name;
+      const queryLower = query.toLowerCase();
+
+      // Check filename match first
+      const nameMatch = fileName.toLowerCase().includes(queryLower);
+
+      // For content search, check if file is searchable
+      let contentMatch = null;
+      if (this.isSearchableFile(fileName, fileTypes)) {
+        contentMatch = await this.searchFileContent(file.id, query);
+      }
+
+      if (nameMatch || (contentMatch && contentMatch.found)) {
+        allResults.push({
+          id: file.id,
+          name: fileName,
+          path: this.constructFullPath(file),
+          webUrl: file.webUrl,
+          size: file.size,
+          lastModified: file.lastModifiedDateTime,
+          author: file.createdBy?.user?.displayName,
+          type: 'file',
+          source: 'myDrive',
+          matchType: nameMatch && contentMatch?.found ? 'both' : (nameMatch ? 'filename' : 'content'),
+          contentMatches: contentMatch?.matches || [],
+          preview: contentMatch?.preview || '',
+        });
+
+        if (allResults.length >= maxResults) break;
+      }
+    }
+
+    // Include shared files if requested
+    if (includeShared && allResults.length < maxResults) {
+      try {
+        const sharedResponse = await axios.get(
+          'https://graph.microsoft.com/v1.0/me/drive/sharedWithMe',
+          {
+            headers: {
+              Authorization: `Bearer ${this.authTokens.accessToken}`,
+            },
+            params: {
+              $top: 100,
+            },
+          }
+        );
+
+        const sharedFiles = sharedResponse.data.value || [];
+
+        for (const item of sharedFiles) {
+          if (item.folder || item.remoteItem?.folder) continue;
+
+          const fileName = item.name;
+          const fileId = item.remoteItem?.id || item.id;
+          const queryLower = query.toLowerCase();
+
+          const nameMatch = fileName.toLowerCase().includes(queryLower);
+
+          let contentMatch = null;
+          if (this.isSearchableFile(fileName, fileTypes)) {
+            contentMatch = await this.searchFileContent(fileId, query);
+          }
+
+          if (nameMatch || (contentMatch && contentMatch.found)) {
+            const itemToUse = item.remoteItem || item;
+            allResults.push({
+              id: fileId,
+              name: fileName,
+              path: this.constructFullPath(itemToUse),
+              webUrl: item.remoteItem?.webUrl || item.webUrl,
+              size: item.size,
+              lastModified: item.lastModifiedDateTime,
+              author: item.remoteItem?.createdBy?.user?.displayName,
+              type: 'file',
+              source: 'sharedWithMe',
+              sharedBy: item.remoteItem?.createdBy?.user?.displayName,
+              matchType: nameMatch && contentMatch?.found ? 'both' : (nameMatch ? 'filename' : 'content'),
+              contentMatches: contentMatch?.matches || [],
+              preview: contentMatch?.preview || '',
             });
 
-          allFiles = [...allFiles, ...matchingShared];
-        } catch (sharedError) {
-          // If shared search fails, continue with just myDrive results
-          console.error("Shared files search failed:", sharedError.message);
+            if (allResults.length >= maxResults) break;
+          }
         }
+      } catch (err) {
+        // Continue without shared files if it fails
+      }
+    }
+
+    return allResults;
+  }
+
+  async searchMyFiles(args) {
+    await this.ensureAuthenticated();
+
+    const {
+      query,
+      maxResults = 20,
+      includeShared = false,
+      searchDepth = 'filename',
+      fileTypes = null
+    } = args;
+
+    try {
+      let allFiles = [];
+      let searchMethod = 'filename';
+
+      // Choose search strategy based on searchDepth
+      if (searchDepth === 'auto') {
+        // Try Graph API first (best for work accounts)
+        console.error('Attempting Microsoft Graph Search API...');
+        const graphResult = await this.searchWithGraphAPI(query, maxResults);
+
+        if (graphResult.success) {
+          allFiles = graphResult.results;
+          searchMethod = 'graphAPI';
+          console.error('Graph API search successful!');
+        } else {
+          console.error('Graph API not available, falling back to content search...');
+          // Fall back to content search
+          allFiles = await this.searchWithContentAnalysis(query, maxResults, includeShared, fileTypes);
+          searchMethod = 'contentAnalysis';
+        }
+      } else if (searchDepth === 'content') {
+        // Deep content search
+        console.error('Performing comprehensive content search...');
+        allFiles = await this.searchWithContentAnalysis(query, maxResults, includeShared, fileTypes);
+        searchMethod = 'contentAnalysis';
+      } else {
+        // Default: filename-only search using OneDrive API
+        const response = await axios.get(
+          `https://graph.microsoft.com/v1.0/me/drive/root/search(q='${encodeURIComponent(query)}')`,
+          {
+            headers: {
+              Authorization: `Bearer ${this.authTokens.accessToken}`,
+            },
+            params: {
+              $top: maxResults,
+            },
+          }
+        );
+
+        let items = response.data.value || [];
+        allFiles = items.map((item) => ({
+          id: item.id,
+          name: item.name,
+          path: this.constructFullPath(item),
+          webUrl: item.webUrl,
+          size: item.size,
+          lastModified: item.lastModifiedDateTime,
+          author: item.createdBy?.user?.displayName,
+          type: item.folder ? "folder" : "file",
+          source: "myDrive",
+          matchType: "filename",
+        }));
+
+        // If includeShared is true, also search through shared files
+        if (includeShared) {
+          try {
+            const sharedResponse = await axios.get(
+              "https://graph.microsoft.com/v1.0/me/drive/sharedWithMe",
+              {
+                headers: {
+                  Authorization: `Bearer ${this.authTokens.accessToken}`,
+                },
+                params: {
+                  $top: 100,
+                },
+              }
+            );
+
+            const sharedItems = sharedResponse.data.value || [];
+            const matchingShared = sharedItems
+              .filter((item) =>
+                item.name.toLowerCase().includes(query.toLowerCase())
+              )
+              .slice(0, Math.floor(maxResults / 2))
+              .map((item) => {
+                const itemToUse = item.remoteItem || item;
+                return {
+                  id: item.remoteItem?.id || item.id,
+                  name: item.name,
+                  path: this.constructFullPath(itemToUse),
+                  webUrl: item.remoteItem?.webUrl || item.webUrl,
+                  size: item.size,
+                  lastModified: item.lastModifiedDateTime,
+                  author: item.remoteItem?.createdBy?.user?.displayName,
+                  type: item.folder || item.remoteItem?.folder ? "folder" : "file",
+                  source: "sharedWithMe",
+                  sharedBy: item.remoteItem?.createdBy?.user?.displayName,
+                  matchType: "filename",
+                };
+              });
+
+            allFiles = [...allFiles, ...matchingShared];
+          } catch (sharedError) {
+            console.error("Shared files search failed:", sharedError.message);
+          }
+        }
+
+        searchMethod = 'oneDriveAPI';
       }
 
       return {
@@ -444,9 +752,16 @@ class SharePointMCP {
             text: JSON.stringify(
               {
                 query: query,
+                searchMethod: searchMethod,
+                searchDepth: searchDepth,
                 resultCount: allFiles.length,
                 includeShared: includeShared,
                 files: allFiles,
+                note: searchMethod === 'contentAnalysis'
+                  ? 'Results include content matches. Check contentMatches field for line numbers and previews.'
+                  : searchMethod === 'graphAPI'
+                  ? 'Using Microsoft Graph Search API (comprehensive, includes content search)'
+                  : 'Using filename-only search. Use searchDepth="content" or "auto" for comprehensive search.',
               },
               null,
               2

@@ -5,11 +5,16 @@ A Model Context Protocol (MCP) server that enables AI assistants like Claude to 
 ## Features
 
 - 🔐 **OAuth 2.0 Authentication**: Secure browser-based login with Microsoft
-- 🔍 **File Search**: Search files by name, content, or both
-- 📁 **Folder Structure**: Explore SharePoint folder hierarchies
+- 🔍 **Comprehensive File Search**:
+  - **Filename search** (fast, OneDrive API)
+  - **Content search** (deep, searches inside files)
+  - **Auto mode** (tries Graph API, falls back to content search)
+  - Supports 40+ file types for content search (code, text, config files)
+- 📁 **Folder Structure**: Explore OneDrive folder hierarchies
 - 📄 **File Content**: Retrieve file contents
 - ⏰ **Recent Files**: List recently modified files
-- 🛡️ **Permission-Based**: Only accesses sites the user grants permission to
+- 🔄 **Shared Files**: Search and list files shared with you
+- 🛡️ **Permission-Based**: Only accesses files the user grants permission to
 
 ## Prerequisites
 
@@ -111,10 +116,36 @@ In Claude: "Set my SharePoint site to: https://yourtenant.sharepoint.com/sites/y
 
 ### 3. Search and Explore
 
+**Quick filename search (default):**
 ```
-"Search for files containing 'quarterly report'"
+"Search for files named 'quarterly report'"
+```
+
+**Deep content search:**
+```
+"Search for files containing 'quarterly report' in their content with searchDepth='content'"
+```
+
+**Smart search (auto):**
+```
+"Search for 'API documentation' using auto search depth"
+```
+
+**Search specific file types:**
+```
+"Search for 'function' in JavaScript files only with fileTypes=['js', 'jsx']"
+```
+
+**Include shared files:**
+```
+"Search for 'budget' with includeShared=true"
+```
+
+**Other operations:**
+```
 "Show me the folder structure"
 "What are the 10 most recently modified files?"
+"List files shared with me"
 ```
 
 ## Available Tools
@@ -132,13 +163,26 @@ Sets the SharePoint site URL.
 **Parameters:**
 - `siteUrl` (required): Full SharePoint site URL
 
-### `search_files`
-Searches for files by filename or content.
+### `search_my_files`
+Searches for files in your OneDrive by filename or content with multiple search strategies.
 
 **Parameters:**
 - `query` (required): Search query string
-- `searchType` (optional): "filename", "content", or "both"
-- `maxResults` (optional): Maximum results (default: 20)
+- `searchDepth` (optional): Search strategy
+  - `"filename"` (default): Fast filename-only search using OneDrive API
+  - `"content"`: Comprehensive search that downloads and searches file contents
+  - `"auto"`: Tries Microsoft Graph API first, falls back to content search
+- `maxResults` (optional): Maximum results to return (default: 20)
+- `includeShared` (optional): Include files shared with you (default: false)
+- `fileTypes` (optional): Array of file extensions to search (e.g., `['js', 'md', 'txt']`)
+
+**Examples:**
+- Quick filename search: `searchDepth: "filename"`
+- Deep content search: `searchDepth: "content"`
+- Best of both worlds: `searchDepth: "auto"`
+
+**Supported file types for content search:**
+Code files (js, py, java, etc.), text files (txt, md, log), config files (json, yml, ini), and 40+ other text-based formats
 
 ### `get_folder_structure`
 Retrieves folder structure.
