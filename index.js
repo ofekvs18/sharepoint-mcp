@@ -65,7 +65,7 @@ class SharePointMCP {
         {
           name: "search_my_files",
           description:
-            "Search for files in your OneDrive by filename or content",
+            "Search for files in your OneDrive by filename or content. Optionally include files shared with you.",
           inputSchema: {
             type: "object",
             properties: {
@@ -77,6 +77,11 @@ class SharePointMCP {
                 type: "number",
                 description: "Maximum number of results to return",
                 default: 20,
+              },
+              includeShared: {
+                type: "boolean",
+                description: "Include files shared with you in search results",
+                default: false,
               },
             },
             required: ["query"],
@@ -132,6 +137,21 @@ class SharePointMCP {
             },
           },
         },
+        {
+          name: "list_shared_files",
+          description:
+            "List files that have been shared with you by others",
+          inputSchema: {
+            type: "object",
+            properties: {
+              limit: {
+                type: "number",
+                description: "Number of items to return",
+                default: 20,
+              },
+            },
+          },
+        },
       ],
     }));
 
@@ -151,6 +171,8 @@ class SharePointMCP {
             return await this.getFileContent(args);
           case "list_recent_files":
             return await this.listRecentFiles(args);
+          case "list_shared_files":
+            return await this.listSharedFiles(args);
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -317,7 +339,7 @@ class SharePointMCP {
   async searchMyFiles(args) {
     await this.ensureAuthenticated();
 
-    const { query, maxResults = 20 } = args;
+    const { query, maxResults = 20, includeShared = false } = args;
 
     try {
       // Use OneDrive Drive API search - works for both personal and work accounts
@@ -334,9 +356,8 @@ class SharePointMCP {
         }
       );
 
-      const items = response.data.value || [];
-
-      const files = items.map((item) => ({
+      let items = response.data.value || [];
+      let allFiles = items.map((item) => ({
         id: item.id,
         name: item.name,
         path: item.webUrl,
@@ -344,7 +365,49 @@ class SharePointMCP {
         lastModified: item.lastModifiedDateTime,
         author: item.createdBy?.user?.displayName,
         type: item.folder ? "folder" : "file",
+        source: "myDrive",
       }));
+
+      // If includeShared is true, also search through shared files
+      if (includeShared) {
+        try {
+          const sharedResponse = await axios.get(
+            "https://graph.microsoft.com/v1.0/me/drive/sharedWithMe",
+            {
+              headers: {
+                Authorization: `Bearer ${this.authTokens.accessToken}`,
+              },
+              params: {
+                $top: 100, // Get more shared files to search through
+              },
+            }
+          );
+
+          const sharedItems = sharedResponse.data.value || [];
+          // Filter shared items by query (simple name matching)
+          const matchingShared = sharedItems
+            .filter((item) =>
+              item.name.toLowerCase().includes(query.toLowerCase())
+            )
+            .slice(0, Math.floor(maxResults / 2)) // Limit shared results
+            .map((item) => ({
+              id: item.remoteItem?.id || item.id,
+              name: item.name,
+              path: item.remoteItem?.webUrl || item.webUrl,
+              size: item.size,
+              lastModified: item.lastModifiedDateTime,
+              author: item.remoteItem?.createdBy?.user?.displayName,
+              type: item.folder || item.remoteItem?.folder ? "folder" : "file",
+              source: "sharedWithMe",
+              sharedBy: item.remoteItem?.createdBy?.user?.displayName,
+            }));
+
+          allFiles = [...allFiles, ...matchingShared];
+        } catch (sharedError) {
+          // If shared search fails, continue with just myDrive results
+          console.error("Shared files search failed:", sharedError.message);
+        }
+      }
 
       return {
         content: [
@@ -353,8 +416,9 @@ class SharePointMCP {
             text: JSON.stringify(
               {
                 query: query,
-                resultCount: files.length,
-                files: files,
+                resultCount: allFiles.length,
+                includeShared: includeShared,
+                files: allFiles,
               },
               null,
               2
@@ -504,6 +568,58 @@ class SharePointMCP {
     } catch (error) {
       throw new Error(
         `Failed to list recent files: ${error.response?.data?.error?.message || error.message}`
+      );
+    }
+  }
+
+  async listSharedFiles(args) {
+    await this.ensureAuthenticated();
+
+    const { limit = 20 } = args;
+
+    try {
+      const response = await axios.get(
+        "https://graph.microsoft.com/v1.0/me/drive/sharedWithMe",
+        {
+          headers: {
+            Authorization: `Bearer ${this.authTokens.accessToken}`,
+          },
+          params: {
+            $top: limit,
+          },
+        }
+      );
+
+      const items = response.data.value || [];
+      const files = items.map((item) => ({
+        id: item.remoteItem?.id || item.id,
+        name: item.name,
+        type: item.folder || item.remoteItem?.folder ? "folder" : "file",
+        size: item.size,
+        lastModified: item.lastModifiedDateTime,
+        webUrl: item.remoteItem?.webUrl || item.webUrl,
+        sharedBy: item.remoteItem?.createdBy?.user?.displayName,
+        sharedDateTime: item.remoteItem?.shared?.sharedDateTime,
+      }));
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                sharedFiles: files,
+                count: files.length,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      throw new Error(
+        `Failed to list shared files: ${error.response?.data?.error?.message || error.message}`
       );
     }
   }
