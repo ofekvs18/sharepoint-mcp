@@ -85,13 +85,13 @@ class SharePointMCP {
               },
               searchDepth: {
                 type: "string",
-                description: "Search depth: 'filename' (fast, names only), 'content' (comprehensive, searches file contents), 'auto' (tries Graph API first, falls back to content search)",
+                description: "Search depth: 'filename' (fast, names only), 'content' (searches plain text files only: .txt, .md, .js, etc. - NOT Office docs), 'auto' (uses Graph API for Office docs + all other files)",
                 enum: ["filename", "content", "auto"],
                 default: "filename",
               },
               fileTypes: {
                 type: "array",
-                description: "Filter by file extensions (e.g., ['txt', 'js', 'md']). Only applies to content search.",
+                description: "Filter by file extensions. Note: Office documents (.docx, .xlsx, .pptx, .pdf) require searchDepth='auto' - they cannot be searched with 'content' mode.",
                 items: {
                   type: "string",
                 },
@@ -375,6 +375,13 @@ class SharePointMCP {
     return fullPath;
   }
 
+  // Helper: Check if file is Office document
+  isOfficeDocument(filename) {
+    const officeExtensions = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf'];
+    const ext = filename.split('.').pop().toLowerCase();
+    return officeExtensions.includes(ext);
+  }
+
   // Helper: Check if file is searchable based on extension
   isSearchableFile(filename, allowedTypes = null) {
     const searchableExtensions = [
@@ -388,7 +395,17 @@ class SharePointMCP {
 
     // If specific file types are requested, check against those
     if (allowedTypes && allowedTypes.length > 0) {
-      return allowedTypes.includes(ext);
+      // Check if user is requesting Office documents
+      const requestingOffice = allowedTypes.some(type =>
+        ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf'].includes(type)
+      );
+
+      if (requestingOffice && allowedTypes.includes(ext)) {
+        // Office documents require Graph Search API, not content search
+        return false;
+      }
+
+      return allowedTypes.includes(ext) && searchableExtensions.includes(ext);
     }
 
     return searchableExtensions.includes(ext);
@@ -632,6 +649,15 @@ class SharePointMCP {
   async searchWithContentAnalysis(query, maxResults, includeShared, fileTypes) {
     const allResults = [];
 
+    // Check if user is trying to search Office documents
+    if (fileTypes && fileTypes.some(type => ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf'].includes(type))) {
+      console.error('⚠️  WARNING: Office documents (.docx, .xlsx, .pptx, .pdf) are binary files and cannot be searched with content mode.');
+      console.error('💡 TIP: Use searchDepth="auto" instead, which uses Microsoft Graph Search API to search inside Office documents.');
+      return [{
+        note: 'Office documents (Word, Excel, PowerPoint, PDF) cannot be searched with content mode because they are binary/compressed files. Use searchDepth="auto" instead to search these files using Microsoft Graph Search API.'
+      }];
+    }
+
     console.error('Recursively scanning all files in drive...');
 
     // Get ALL files from user's drive recursively
@@ -647,6 +673,12 @@ class SharePointMCP {
     });
 
     console.error(`After filtering: ${files.length} searchable files.`);
+
+    // Count Office documents separately
+    const officeDocCount = files.filter(f => this.isOfficeDocument(f.name)).length;
+    if (officeDocCount > 0) {
+      console.error(`ℹ️  Note: Skipping ${officeDocCount} Office documents (use searchDepth="auto" to search these)`);
+    }
 
     // Calculate relevance scores and sort by relevance
     const scoredFiles = files.map(file => ({
