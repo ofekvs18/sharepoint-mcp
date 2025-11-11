@@ -38,6 +38,9 @@ class SharePointMCP {
       siteUrl: null,
     };
 
+    // Track active auth server to prevent port conflicts
+    this.activeAuthServer = null;
+
     this.setupHandlers();
   }
 
@@ -208,6 +211,19 @@ class SharePointMCP {
       redirectUri = "http://localhost:3000/callback"
     } = args;
 
+    // Close any existing auth server first
+    if (this.activeAuthServer) {
+      console.error("Closing existing authentication server...");
+      try {
+        await new Promise((resolve) => {
+          this.activeAuthServer.close(() => resolve());
+        });
+        this.activeAuthServer = null;
+      } catch (err) {
+        console.error("Error closing existing server:", err.message);
+      }
+    }
+
     return new Promise((resolve, reject) => {
       const app = express();
       let server;
@@ -241,6 +257,7 @@ class SharePointMCP {
         if (error) {
           res.send(`<h1>Authentication failed: ${error}</h1>`);
           server.close();
+          this.activeAuthServer = null;
           reject(new Error(`Authentication failed: ${error}`));
           return;
         }
@@ -277,6 +294,7 @@ class SharePointMCP {
           `);
 
           server.close();
+          this.activeAuthServer = null;
 
           const successMessage = clientId === DEFAULT_CLIENT_ID
             ? "Successfully authenticated with SharePoint using default public client ID! 🎉\n\n" +
@@ -296,12 +314,14 @@ class SharePointMCP {
         } catch (error) {
           res.send(`<h1>Token exchange failed</h1>`);
           server.close();
+          this.activeAuthServer = null;
           reject(error);
         }
       });
 
-      // Start server
+      // Start server with error handling
       server = app.listen(3000, async () => {
+        this.activeAuthServer = server;
         console.error("\n=== SharePoint Authentication ===");
         if (clientId === DEFAULT_CLIENT_ID) {
           console.error("Using default public client ID (no Azure AD setup needed!)");
@@ -309,12 +329,30 @@ class SharePointMCP {
         console.error("Opening browser for Microsoft login...");
         console.error("Login URL:", fullAuthUrl);
         console.error("================================\n");
-        await open(fullAuthUrl);
+
+        try {
+          await open(fullAuthUrl);
+        } catch (err) {
+          console.error("Could not open browser automatically. Please open this URL manually:");
+          console.error(fullAuthUrl);
+        }
+      });
+
+      // Handle server errors (like port already in use)
+      server.on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+          reject(new Error('Port 3000 is already in use. Please close any other applications using this port and try again.'));
+        } else {
+          reject(err);
+        }
       });
 
       // Timeout after 5 minutes
       setTimeout(() => {
-        server.close();
+        if (server && server.listening) {
+          server.close();
+          this.activeAuthServer = null;
+        }
         reject(new Error("Authentication timeout"));
       }, 300000);
     });
