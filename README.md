@@ -121,18 +121,18 @@ In Claude: "Set my SharePoint site to: https://yourtenant.sharepoint.com/sites/y
 "Search for files named 'quarterly report'"
 ```
 
-**Deep content search (plain text files only):**
+**Deep content search (ALL file types including Office docs):**
 ```
 "Search for files containing 'quarterly report' in their content with searchDepth='content'"
+"Search for 'budget' in Word documents with searchDepth='content' and fileTypes=['docx']"
 ```
-*Note: Content search only works with plain text files (.txt, .md, .js, etc.). For Office documents, use auto mode.*
+*Searches inside all files including Office documents (.docx, .xlsx, .pptx, .pdf) using text extraction.*
 
-**Smart search (recommended for Office docs):**
+**Smart search (Graph API for enterprise):**
 ```
 "Search for 'API documentation' using searchDepth='auto'"
-"Search for 'budget' in Word documents with searchDepth='auto' and fileTypes=['docx']"
 ```
-*Uses Microsoft Graph Search API which can search inside Word, Excel, PowerPoint, and PDF files.*
+*Uses Microsoft Graph Search API (best for work/enterprise accounts with advanced indexing).*
 
 **Search specific file types:**
 ```
@@ -173,22 +173,26 @@ Searches for files in your OneDrive by filename or content with multiple search 
 - `query` (required): Search query string
 - `searchDepth` (optional): Search strategy
   - `"filename"` (default): Fast filename-only search using OneDrive API
-  - `"content"`: Downloads and searches **plain text files only** (.txt, .md, .js, etc.)
-  - `"auto"`: Uses Microsoft Graph Search API (searches ALL file types including Office docs)
+  - `"content"`: **Comprehensive search with text extraction** - searches inside ALL files including Office documents
+  - `"auto"`: Uses Microsoft Graph Search API (best for enterprise accounts)
 - `maxResults` (optional): Maximum results to return (default: 20)
 - `includeShared` (optional): Include files shared with you (default: false)
-- `fileTypes` (optional): Array of file extensions to search (e.g., `['js', 'md', 'txt']`)
+- `fileTypes` (optional): Array of file extensions to search (e.g., `['js', 'md', 'docx', 'pdf']`)
 
 **Examples:**
 - Quick filename search: `searchDepth: "filename"`
-- Search plain text files: `searchDepth: "content"` (only .txt, .md, .js, code files)
-- **Search Office documents**: `searchDepth: "auto"` (recommended for .docx, .xlsx, .pdf)
+- **Search Office documents**: `searchDepth: "content"` with `fileTypes: ['docx']` ✅
+- Search code files: `searchDepth: "content"` with `fileTypes: ['js', 'py']`
+- Enterprise search: `searchDepth: "auto"` (uses Graph Search API)
 
-**Important Notes:**
-- **Office documents** (.docx, .xlsx, .pptx, .pdf) are binary/compressed files and **require `searchDepth="auto"`**
-- `"content"` mode only works with plain text files
-- `"auto"` mode uses Graph Search API which can search inside Office documents
-- Supported plain text formats: js, py, java, txt, md, log, json, yml, ini, and 40+ other code/text files
+**How it works:**
+- **Plain text files** (.txt, .md, .js, etc.): Direct content download and search
+- **Office documents** (.docx, .xlsx, .pptx, .pdf): Automatic text extraction via Graph API, then search
+- **All file types** supported: 40+ plain text formats + Word, Excel, PowerPoint, PDF
+
+**Supported file types:**
+- Plain text: js, py, java, txt, md, log, json, yml, ini, csv, sql, html, css, etc.
+- Office docs: docx, doc, xlsx, xls, pptx, ppt, pdf
 
 ### `get_folder_structure`
 Retrieves folder structure.

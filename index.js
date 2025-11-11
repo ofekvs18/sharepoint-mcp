@@ -85,13 +85,13 @@ class SharePointMCP {
               },
               searchDepth: {
                 type: "string",
-                description: "Search depth: 'filename' (fast, names only), 'content' (searches plain text files only: .txt, .md, .js, etc. - NOT Office docs), 'auto' (uses Graph API for Office docs + all other files)",
+                description: "Search depth: 'filename' (fast, names only), 'content' (comprehensive, searches inside all files including Office docs with text extraction), 'auto' (uses Graph Search API, best for enterprise accounts)",
                 enum: ["filename", "content", "auto"],
                 default: "filename",
               },
               fileTypes: {
                 type: "array",
-                description: "Filter by file extensions. Note: Office documents (.docx, .xlsx, .pptx, .pdf) require searchDepth='auto' - they cannot be searched with 'content' mode.",
+                description: "Filter by file extensions (e.g., ['txt', 'js', 'md', 'docx', 'pdf']). Works with all searchDepth modes.",
                 items: {
                   type: "string",
                 },
@@ -385,68 +385,125 @@ class SharePointMCP {
   // Helper: Check if file is searchable based on extension
   isSearchableFile(filename, allowedTypes = null) {
     const searchableExtensions = [
+      // Plain text files
       'txt', 'md', 'js', 'jsx', 'ts', 'tsx', 'json', 'xml', 'html', 'htm',
       'css', 'scss', 'sass', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'php',
       'rb', 'go', 'rs', 'sh', 'bash', 'yml', 'yaml', 'toml', 'ini', 'cfg',
-      'log', 'csv', 'sql', 'r', 'swift', 'kt', 'dart', 'vue', 'svelte'
+      'log', 'csv', 'sql', 'r', 'swift', 'kt', 'dart', 'vue', 'svelte',
+      // Office documents (with text extraction)
+      'docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf'
     ];
 
     const ext = filename.split('.').pop().toLowerCase();
 
     // If specific file types are requested, check against those
     if (allowedTypes && allowedTypes.length > 0) {
-      // Check if user is requesting Office documents
-      const requestingOffice = allowedTypes.some(type =>
-        ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf'].includes(type)
-      );
-
-      if (requestingOffice && allowedTypes.includes(ext)) {
-        // Office documents require Graph Search API, not content search
-        return false;
-      }
-
       return allowedTypes.includes(ext) && searchableExtensions.includes(ext);
     }
 
     return searchableExtensions.includes(ext);
   }
 
-  // Helper: Download and search file content
-  async searchFileContent(fileId, query, driveId = null) {
+  // Helper: Extract text from Office document
+  async extractOfficeText(fileId, driveId = null) {
     try {
-      // Construct the correct endpoint based on whether it's a shared file
-      let endpoint;
-      if (driveId) {
-        // Shared file - use drives/{driveId}/items/{itemId}
-        endpoint = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/content`;
+      // Try to get preview which includes extracted text
+      const previewEndpoint = driveId
+        ? `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/preview`
+        : `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/preview`;
+
+      const previewResponse = await axios.post(
+        previewEndpoint,
+        { viewer: 'onedrive', chromeless: true },
+        {
+          headers: {
+            Authorization: `Bearer ${this.authTokens.accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 15000,
+        }
+      );
+
+      // Preview API returns a getUrl that we can use, but we'll try direct content conversion
+      // Try to get document as HTML which extracts text
+      const htmlEndpoint = driveId
+        ? `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/content?format=html`
+        : `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/content?format=html`;
+
+      try {
+        const htmlResponse = await axios.get(htmlEndpoint, {
+          headers: {
+            Authorization: `Bearer ${this.authTokens.accessToken}`,
+          },
+          responseType: 'text',
+          timeout: 20000,
+        });
+
+        // Strip HTML tags to get plain text
+        const text = htmlResponse.data
+          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&nbsp;/g, ' ')
+          .replace(/&[a-z]+;/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        return text;
+      } catch (htmlError) {
+        // HTML conversion not available, return empty
+        return '';
+      }
+    } catch (error) {
+      return '';
+    }
+  }
+
+  // Helper: Download and search file content
+  async searchFileContent(fileId, query, driveId = null, filename = '') {
+    try {
+      let content = '';
+
+      // Check if this is an Office document
+      if (filename && this.isOfficeDocument(filename)) {
+        // Use Office text extraction
+        content = await this.extractOfficeText(fileId, driveId);
+
+        if (!content) {
+          // Text extraction failed, skip this file
+          return { found: false, error: 'Could not extract text from Office document' };
+        }
       } else {
-        // Regular file - use me/drive/items/{itemId}
-        endpoint = `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/content`;
+        // Regular plain text file - download directly
+        const endpoint = driveId
+          ? `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/content`
+          : `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/content`;
+
+        const response = await axios.get(endpoint, {
+          headers: {
+            Authorization: `Bearer ${this.authTokens.accessToken}`,
+          },
+          responseType: 'text',
+          maxContentLength: 10 * 1024 * 1024, // Limit to 10MB
+          timeout: 30000,
+        });
+
+        content = response.data;
       }
 
-      const response = await axios.get(endpoint, {
-        headers: {
-          Authorization: `Bearer ${this.authTokens.accessToken}`,
-        },
-        responseType: 'text',
-        maxContentLength: 10 * 1024 * 1024, // Limit to 10MB
-        timeout: 30000, // 30 second timeout
-      });
-
-      const content = response.data;
       const queryLower = query.toLowerCase();
 
       // Search for query in content (case-insensitive)
       if (content.toLowerCase().includes(queryLower)) {
         // Find context around matches
-        const lines = content.split('\n');
+        const lines = content.split(/\r?\n/);
         const matchingLines = [];
 
         for (let i = 0; i < lines.length; i++) {
           if (lines[i].toLowerCase().includes(queryLower)) {
             matchingLines.push({
               lineNumber: i + 1,
-              content: lines[i].trim(),
+              content: lines[i].trim().substring(0, 300),
             });
 
             // Limit to first 5 matches per file
@@ -649,15 +706,6 @@ class SharePointMCP {
   async searchWithContentAnalysis(query, maxResults, includeShared, fileTypes) {
     const allResults = [];
 
-    // Check if user is trying to search Office documents
-    if (fileTypes && fileTypes.some(type => ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf'].includes(type))) {
-      console.error('⚠️  WARNING: Office documents (.docx, .xlsx, .pptx, .pdf) are binary files and cannot be searched with content mode.');
-      console.error('💡 TIP: Use searchDepth="auto" instead, which uses Microsoft Graph Search API to search inside Office documents.');
-      return [{
-        note: 'Office documents (Word, Excel, PowerPoint, PDF) cannot be searched with content mode because they are binary/compressed files. Use searchDepth="auto" instead to search these files using Microsoft Graph Search API.'
-      }];
-    }
-
     console.error('Recursively scanning all files in drive...');
 
     // Get ALL files from user's drive recursively
@@ -674,10 +722,10 @@ class SharePointMCP {
 
     console.error(`After filtering: ${files.length} searchable files.`);
 
-    // Count Office documents separately
+    // Count Office documents that will be processed with text extraction
     const officeDocCount = files.filter(f => this.isOfficeDocument(f.name)).length;
     if (officeDocCount > 0) {
-      console.error(`ℹ️  Note: Skipping ${officeDocCount} Office documents (use searchDepth="auto" to search these)`);
+      console.error(`ℹ️  Found ${officeDocCount} Office documents - will extract text for searching`);
     }
 
     // Calculate relevance scores and sort by relevance
@@ -715,7 +763,7 @@ class SharePointMCP {
       if (this.isSearchableFile(fileName, fileTypes)) {
         filesSearched++;
         const driveId = file.parentReference?.driveId;
-        contentMatch = await this.searchFileContent(file.id, query, driveId);
+        contentMatch = await this.searchFileContent(file.id, query, driveId, fileName);
       }
 
       if (nameMatch || (contentMatch && contentMatch.found)) {
@@ -765,7 +813,7 @@ class SharePointMCP {
         if (this.isSearchableFile(fileName, fileTypes)) {
           filesSearched++;
           const driveId = file.parentReference?.driveId;
-          const contentMatch = await this.searchFileContent(file.id, query, driveId);
+          const contentMatch = await this.searchFileContent(file.id, query, driveId, fileName);
 
           if (contentMatch && contentMatch.found) {
             const result = {
@@ -830,7 +878,7 @@ class SharePointMCP {
           let contentMatch = null;
           if (this.isSearchableFile(fileName, fileTypes)) {
             // For shared files, we need to pass the driveId
-            contentMatch = await this.searchFileContent(fileId, query, driveId);
+            contentMatch = await this.searchFileContent(fileId, query, driveId, fileName);
           }
 
           if (nameMatch || (contentMatch && contentMatch.found)) {
