@@ -320,38 +320,30 @@ class SharePointMCP {
     const { query, maxResults = 20 } = args;
 
     try {
-      // Search in user's OneDrive
-      const response = await axios.post(
-        "https://graph.microsoft.com/v1.0/search/query",
-        {
-          requests: [
-            {
-              entityTypes: ["driveItem"],
-              query: {
-                queryString: query,
-              },
-              from: 0,
-              size: maxResults,
-            },
-          ],
-        },
+      // Use OneDrive Drive API search - works for both personal and work accounts
+      // The Microsoft Graph Search API (/search/query) only works for work accounts
+      const response = await axios.get(
+        `https://graph.microsoft.com/v1.0/me/drive/root/search(q='${encodeURIComponent(query)}')`,
         {
           headers: {
             Authorization: `Bearer ${this.authTokens.accessToken}`,
-            "Content-Type": "application/json",
+          },
+          params: {
+            $top: maxResults,
           },
         }
       );
 
-      const results = response.data.value[0]?.hitsContainers[0]?.hits || [];
+      const items = response.data.value || [];
 
-      const files = results.map((hit) => ({
-        id: hit.resource.id,
-        name: hit.resource.name,
-        path: hit.resource.webUrl,
-        size: hit.resource.size,
-        lastModified: hit.resource.lastModifiedDateTime,
-        author: hit.resource.createdBy?.user?.displayName,
+      const files = items.map((item) => ({
+        id: item.id,
+        name: item.name,
+        path: item.webUrl,
+        size: item.size,
+        lastModified: item.lastModifiedDateTime,
+        author: item.createdBy?.user?.displayName,
+        type: item.folder ? "folder" : "file",
       }));
 
       return {
