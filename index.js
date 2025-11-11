@@ -491,56 +491,73 @@ class SharePointMCP {
     }
   }
 
-  // Helper: Perform comprehensive content search
-  async searchWithContentAnalysis(query, maxResults, includeShared, fileTypes) {
-    const allResults = [];
+  // Helper: Recursively get all files from drive
+  async getAllFilesRecursively(folderId = 'root', maxFiles = 5000) {
+    const allFiles = [];
+    const processedIds = new Set();
+    const foldersToProcess = [folderId];
 
-    // Get all files from user's drive
-    const driveResponse = await axios.get(
-      'https://graph.microsoft.com/v1.0/me/drive/root/children',
-      {
-        headers: {
-          Authorization: `Bearer ${this.authTokens.accessToken}`,
-        },
-        params: {
-          $top: 1000, // Get more files to search through
-        },
-      }
-    );
+    while (foldersToProcess.length > 0 && allFiles.length < maxFiles) {
+      const currentFolderId = foldersToProcess.shift();
 
-    const files = driveResponse.data.value || [];
+      try {
+        const endpoint = currentFolderId === 'root'
+          ? 'https://graph.microsoft.com/v1.0/me/drive/root/children'
+          : `https://graph.microsoft.com/v1.0/me/drive/items/${currentFolderId}/children`;
 
-    // Also get recent files for broader coverage
-    try {
-      const recentResponse = await axios.get(
-        'https://graph.microsoft.com/v1.0/me/drive/recent',
-        {
+        const response = await axios.get(endpoint, {
           headers: {
             Authorization: `Bearer ${this.authTokens.accessToken}`,
           },
           params: {
-            $top: 200,
+            $top: 1000,
           },
-        }
-      );
+        });
 
-      // Merge with existing files (deduplicate by id)
-      const recentFiles = recentResponse.data.value || [];
-      const fileIds = new Set(files.map(f => f.id));
+        const items = response.data.value || [];
 
-      for (const file of recentFiles) {
-        if (!fileIds.has(file.id)) {
-          files.push(file);
-          fileIds.add(file.id);
+        for (const item of items) {
+          if (processedIds.has(item.id)) continue;
+          processedIds.add(item.id);
+
+          if (item.folder) {
+            // Add folder to be processed
+            foldersToProcess.push(item.id);
+          } else {
+            // Add file to results
+            allFiles.push(item);
+            if (allFiles.length >= maxFiles) break;
+          }
         }
+      } catch (err) {
+        console.error(`Error processing folder ${currentFolderId}:`, err.message);
+        // Continue with other folders
       }
-    } catch (err) {
-      // Continue with just root files if recent fails
     }
 
+    return allFiles;
+  }
+
+  // Helper: Perform comprehensive content search
+  async searchWithContentAnalysis(query, maxResults, includeShared, fileTypes) {
+    const allResults = [];
+
+    console.error('Recursively scanning all files in drive...');
+
+    // Get ALL files from user's drive recursively
+    const files = await this.getAllFilesRecursively('root', 5000);
+
+    console.error(`Found ${files.length} files. Searching through content...`);
+
     // Search through files
+    let filesProcessed = 0;
     for (const file of files) {
       if (file.folder) continue; // Skip folders
+
+      filesProcessed++;
+      if (filesProcessed % 50 === 0) {
+        console.error(`Processed ${filesProcessed}/${files.length} files, found ${allResults.length} matches...`);
+      }
 
       const fileName = file.name;
       const queryLower = query.toLowerCase();
@@ -573,6 +590,8 @@ class SharePointMCP {
         if (allResults.length >= maxResults) break;
       }
     }
+
+    console.error(`Content search complete. Found ${allResults.length} matching files.`);
 
     // Include shared files if requested
     if (includeShared && allResults.length < maxResults) {
