@@ -140,6 +140,25 @@ class SharePointMCP {
           },
         },
         {
+          name: "inspect_file_metadata",
+          description:
+            "Get detailed metadata about a file including all IDs and paths for debugging",
+          inputSchema: {
+            type: "object",
+            properties: {
+              fileId: {
+                type: "string",
+                description: "File ID from search results",
+              },
+              driveId: {
+                type: "string",
+                description: "Drive ID (optional, if file is from another drive)",
+              },
+            },
+            required: ["fileId"],
+          },
+        },
+        {
           name: "list_recent_files",
           description:
             "List your recently accessed or modified files in OneDrive",
@@ -186,6 +205,8 @@ class SharePointMCP {
             return await this.listMyFiles(args);
           case "get_file_content":
             return await this.getFileContent(args);
+          case "inspect_file_metadata":
+            return await this.inspectFileMetadata(args);
           case "list_recent_files":
             return await this.listRecentFiles(args);
           case "list_shared_files":
@@ -1132,6 +1153,111 @@ class SharePointMCP {
       };
     } catch (error) {
       throw new Error(`Failed to list files: ${error.response?.data?.error?.message || error.message}`);
+    }
+  }
+
+  async inspectFileMetadata(args) {
+    await this.ensureAuthenticated();
+
+    const { fileId, driveId } = args;
+
+    if (!fileId) {
+      throw new Error("fileId is required");
+    }
+
+    try {
+      // Try multiple endpoints to get file metadata
+      const results = {
+        fileId: fileId,
+        driveId: driveId || null,
+        attempts: [],
+      };
+
+      // Attempt 1: Try with me/drive/items
+      try {
+        const endpoint1 = `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}`;
+        const response1 = await axios.get(endpoint1, {
+          headers: {
+            Authorization: `Bearer ${this.authTokens.accessToken}`,
+          },
+        });
+
+        results.attempts.push({
+          method: 'me/drive/items/{id}',
+          status: 'SUCCESS',
+          data: response1.data,
+        });
+      } catch (err1) {
+        results.attempts.push({
+          method: 'me/drive/items/{id}',
+          status: 'FAILED',
+          error: err1.response?.status || err1.message,
+        });
+      }
+
+      // Attempt 2: Try with drives/{driveId}/items if driveId provided
+      if (driveId) {
+        try {
+          const endpoint2 = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}`;
+          const response2 = await axios.get(endpoint2, {
+            headers: {
+              Authorization: `Bearer ${this.authTokens.accessToken}`,
+            },
+          });
+
+          results.attempts.push({
+            method: 'drives/{driveId}/items/{id}',
+            status: 'SUCCESS',
+            data: response2.data,
+          });
+        } catch (err2) {
+          results.attempts.push({
+            method: 'drives/{driveId}/items/{id}',
+            status: 'FAILED',
+            error: err2.response?.status || err2.message,
+          });
+        }
+      }
+
+      // Attempt 3: Search for the file to get its real location
+      try {
+        const searchResponse = await axios.get(
+          `https://graph.microsoft.com/v1.0/me/drive/root/search(q='${fileId}')`,
+          {
+            headers: {
+              Authorization: `Bearer ${this.authTokens.accessToken}`,
+            },
+            params: {
+              $top: 5,
+            },
+          }
+        );
+
+        results.attempts.push({
+          method: 'search by id',
+          status: 'SUCCESS',
+          data: searchResponse.data.value,
+        });
+      } catch (err3) {
+        results.attempts.push({
+          method: 'search by id',
+          status: 'FAILED',
+          error: err3.response?.status || err3.message,
+        });
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(results, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      throw new Error(
+        `Failed to inspect file metadata: ${error.message}`
+      );
     }
   }
 
