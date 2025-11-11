@@ -75,8 +75,8 @@ class SharePointMCP {
               },
               maxResults: {
                 type: "number",
-                description: "Maximum number of results to return",
-                default: 20,
+                description: "Maximum number of results to return (use smaller values like 5-10 to avoid large responses)",
+                default: 10,
               },
               includeShared: {
                 type: "boolean",
@@ -966,7 +966,7 @@ class SharePointMCP {
 
     const {
       query,
-      maxResults = 20,
+      maxResults = 10,
       includeShared = false,
       searchDepth = 'filename',
       fileTypes = null
@@ -1072,27 +1072,88 @@ class SharePointMCP {
         searchMethod = 'oneDriveAPI';
       }
 
+      // Truncate results if too large to prevent 1MB limit error
+      const truncatedFiles = allFiles.map(file => {
+        const truncated = { ...file };
+
+        // Limit preview length
+        if (truncated.preview && truncated.preview.length > 200) {
+          truncated.preview = truncated.preview.substring(0, 200) + '...';
+        }
+
+        // Limit content matches
+        if (truncated.contentMatches && truncated.contentMatches.length > 3) {
+          truncated.contentMatches = truncated.contentMatches.slice(0, 3);
+          truncated.contentMatchesNote = `Showing first 3 of ${file.contentMatches.length} matches`;
+        }
+
+        // Truncate each match content
+        if (truncated.contentMatches) {
+          truncated.contentMatches = truncated.contentMatches.map(match => ({
+            lineNumber: match.lineNumber,
+            content: match.content.substring(0, 150) + (match.content.length > 150 ? '...' : ''),
+          }));
+        }
+
+        return truncated;
+      });
+
+      const responseText = JSON.stringify(
+        {
+          query: query,
+          searchMethod: searchMethod,
+          searchDepth: searchDepth,
+          resultCount: allFiles.length,
+          includeShared: includeShared,
+          files: truncatedFiles,
+          note: searchMethod === 'contentAnalysis'
+            ? 'Results include content matches. Check contentMatches field for line numbers and previews.'
+            : searchMethod === 'graphAPI'
+            ? 'Using Microsoft Graph Search API (comprehensive, includes content search)'
+            : 'Using filename-only search. Use searchDepth="content" or "auto" for comprehensive search.',
+        },
+        null,
+        2
+      );
+
+      // Final size check - if still too large, reduce maxResults
+      const sizeInBytes = Buffer.byteLength(responseText, 'utf8');
+      const maxSizeBytes = 900000; // 900KB to be safe (limit is 1MB)
+
+      if (sizeInBytes > maxSizeBytes) {
+        // Response is too large, reduce results
+        const ratio = maxSizeBytes / sizeInBytes;
+        const reducedCount = Math.floor(allFiles.length * ratio * 0.8); // 80% of calculated to be safe
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  query: query,
+                  searchMethod: searchMethod,
+                  searchDepth: searchDepth,
+                  resultCount: allFiles.length,
+                  resultsTruncated: true,
+                  truncatedReason: `Response too large (${Math.round(sizeInBytes / 1024)}KB). Showing first ${reducedCount} of ${allFiles.length} results.`,
+                  includeShared: includeShared,
+                  files: truncatedFiles.slice(0, reducedCount),
+                  note: 'Use smaller maxResults or more specific query to see all results.',
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(
-              {
-                query: query,
-                searchMethod: searchMethod,
-                searchDepth: searchDepth,
-                resultCount: allFiles.length,
-                includeShared: includeShared,
-                files: allFiles,
-                note: searchMethod === 'contentAnalysis'
-                  ? 'Results include content matches. Check contentMatches field for line numbers and previews.'
-                  : searchMethod === 'graphAPI'
-                  ? 'Using Microsoft Graph Search API (comprehensive, includes content search)'
-                  : 'Using filename-only search. Use searchDepth="content" or "auto" for comprehensive search.',
-              },
-              null,
-              2
-            ),
+            text: responseText,
           },
         ],
       };
