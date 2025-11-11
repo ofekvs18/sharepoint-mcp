@@ -506,6 +506,77 @@ class SharePointMCP {
     }
   }
 
+  // Helper: Check if file should be skipped (system files, caches, etc.)
+  shouldSkipFile(filename, filepath) {
+    const skipPatterns = [
+      /^~\$/,                    // Temp files (~$)
+      /^\./,                     // Hidden files
+      /\.tmp$/i,                 // Temp files
+      /\.bak$/i,                 // Backup files
+      /\.log$/i,                 // Log files (unless searching for logs)
+      /node_modules/i,           // Node modules
+      /\.git\//i,                // Git directory
+      /package-lock\.json$/i,    // Lock files
+      /yarn\.lock$/i,
+      /\.min\.js$/i,             // Minified files
+      /\.min\.css$/i,
+      /\.map$/i,                 // Source maps
+      /\.cache/i,                // Cache files
+      /thumbs\.db$/i,            // Windows thumbnail cache
+      /\.DS_Store$/i,            // Mac system files
+    ];
+
+    // Check filename patterns
+    for (const pattern of skipPatterns) {
+      if (pattern.test(filename) || (filepath && pattern.test(filepath))) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  // Helper: Calculate relevance score for a file
+  getFileRelevanceScore(file, query) {
+    let score = 0;
+    const fileName = file.name.toLowerCase();
+    const queryLower = query.toLowerCase();
+    const queryWords = queryLower.split(/\s+/).filter(w => w.length > 2);
+
+    // Exact filename match - very high score
+    if (fileName === queryLower) {
+      score += 100;
+    }
+
+    // Filename contains full query
+    if (fileName.includes(queryLower)) {
+      score += 50;
+    }
+
+    // Filename contains query words
+    for (const word of queryWords) {
+      if (fileName.includes(word)) {
+        score += 10;
+      }
+    }
+
+    // File path contains query
+    const filePath = this.constructFullPath(file).toLowerCase();
+    if (filePath.includes(queryLower)) {
+      score += 20;
+    }
+
+    // Recently modified files get bonus
+    if (file.lastModifiedDateTime) {
+      const modifiedDate = new Date(file.lastModifiedDateTime);
+      const daysSinceModified = (Date.now() - modifiedDate.getTime()) / (1000 * 60 * 60 * 24);
+      if (daysSinceModified < 30) score += 5;
+      if (daysSinceModified < 7) score += 10;
+    }
+
+    return score;
+  }
+
   // Helper: Recursively get all files from drive
   async getAllFilesRecursively(folderId = 'root', maxFiles = 5000) {
     const allFiles = [];
@@ -536,10 +607,14 @@ class SharePointMCP {
           processedIds.add(item.id);
 
           if (item.folder) {
+            // Skip system folders
+            if (this.shouldSkipFile(item.name, '')) {
+              continue;
+            }
             // Add folder to be processed
             foldersToProcess.push(item.id);
           } else {
-            // Add file to results
+            // Add file to results (filtering happens later)
             allFiles.push(item);
             if (allFiles.length >= maxFiles) break;
           }
@@ -560,30 +635,53 @@ class SharePointMCP {
     console.error('Recursively scanning all files in drive...');
 
     // Get ALL files from user's drive recursively
-    const files = await this.getAllFilesRecursively('root', 5000);
+    let files = await this.getAllFilesRecursively('root', 5000);
 
-    console.error(`Found ${files.length} files. Searching through content...`);
+    console.error(`Found ${files.length} files. Filtering and prioritizing...`);
 
-    // Search through files
+    // Filter out system files and non-searchable files
+    files = files.filter(file => {
+      if (file.folder) return false;
+      if (this.shouldSkipFile(file.name, this.constructFullPath(file))) return false;
+      return true;
+    });
+
+    console.error(`After filtering: ${files.length} searchable files.`);
+
+    // Calculate relevance scores and sort by relevance
+    const scoredFiles = files.map(file => ({
+      file,
+      score: this.getFileRelevanceScore(file, query)
+    }));
+
+    // Sort by score (highest first)
+    scoredFiles.sort((a, b) => b.score - a.score);
+
+    // Separate files into high-relevance and low-relevance
+    const highRelevanceFiles = scoredFiles.filter(sf => sf.score > 0);
+    const lowRelevanceFiles = scoredFiles.filter(sf => sf.score === 0);
+
+    console.error(`High-relevance files: ${highRelevanceFiles.length}, Low-relevance: ${lowRelevanceFiles.length}`);
+
+    // Search high-relevance files first
     let filesProcessed = 0;
-    for (const file of files) {
-      if (file.folder) continue; // Skip folders
+    let filesSearched = 0;
+
+    // Process high-relevance files (always search content)
+    for (const { file, score } of highRelevanceFiles) {
+      if (allResults.length >= maxResults) break;
 
       filesProcessed++;
-      if (filesProcessed % 50 === 0) {
-        console.error(`Processed ${filesProcessed}/${files.length} files, found ${allResults.length} matches...`);
-      }
-
       const fileName = file.name;
       const queryLower = query.toLowerCase();
 
-      // Check filename match first
+      // Check filename match
       const nameMatch = fileName.toLowerCase().includes(queryLower);
 
-      // For content search, check if file is searchable
+      // For high-relevance files, always search content if searchable
       let contentMatch = null;
       if (this.isSearchableFile(fileName, fileTypes)) {
-        // Pass driveId if available (for files from other drives)
+        filesSearched++;
         const driveId = file.parentReference?.driveId;
         contentMatch = await this.searchFileContent(file.id, query, driveId);
       }
@@ -602,20 +700,73 @@ class SharePointMCP {
           matchType: nameMatch && contentMatch?.found ? 'both' : (nameMatch ? 'filename' : 'content'),
           contentMatches: contentMatch?.matches || [],
           preview: contentMatch?.preview || '',
+          relevanceScore: score,
         };
 
-        // Include driveId if it's from a different drive
+        const driveId = file.parentReference?.driveId;
         if (driveId) {
           result.driveId = driveId;
         }
 
         allResults.push(result);
+      }
 
-        if (allResults.length >= maxResults) break;
+      if (filesProcessed % 20 === 0) {
+        console.error(`Searched ${filesSearched} files (${filesProcessed} processed), found ${allResults.length} matches...`);
       }
     }
 
-    console.error(`Content search complete. Found ${allResults.length} matching files.`);
+    // Only search low-relevance files if we haven't found enough results
+    if (allResults.length < maxResults && lowRelevanceFiles.length > 0) {
+      console.error(`Not enough matches in high-relevance files. Searching broader set...`);
+
+      // Limit how many low-relevance files we search (max 200)
+      const maxLowRelevanceToSearch = Math.min(200, lowRelevanceFiles.length);
+
+      for (let i = 0; i < maxLowRelevanceToSearch && allResults.length < maxResults; i++) {
+        const { file } = lowRelevanceFiles[i];
+        filesProcessed++;
+
+        const fileName = file.name;
+
+        // Only search content for searchable files
+        if (this.isSearchableFile(fileName, fileTypes)) {
+          filesSearched++;
+          const driveId = file.parentReference?.driveId;
+          const contentMatch = await this.searchFileContent(file.id, query, driveId);
+
+          if (contentMatch && contentMatch.found) {
+            const result = {
+              id: file.id,
+              name: fileName,
+              path: this.constructFullPath(file),
+              webUrl: file.webUrl,
+              size: file.size,
+              lastModified: file.lastModifiedDateTime,
+              author: file.createdBy?.user?.displayName,
+              type: 'file',
+              source: 'myDrive',
+              matchType: 'content',
+              contentMatches: contentMatch.matches || [],
+              preview: contentMatch.preview || '',
+              relevanceScore: 0,
+            };
+
+            if (driveId) {
+              result.driveId = driveId;
+            }
+
+            allResults.push(result);
+          }
+        }
+
+        if (filesProcessed % 20 === 0) {
+          console.error(`Searched ${filesSearched} files (${filesProcessed} processed), found ${allResults.length} matches...`);
+        }
+      }
+    }
+
+    console.error(`Content search complete. Searched ${filesSearched} files, found ${allResults.length} matches.`);
 
     // Include shared files if requested
     if (includeShared && allResults.length < maxResults) {
