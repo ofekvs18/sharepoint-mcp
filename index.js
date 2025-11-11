@@ -231,10 +231,14 @@ class SharePointMCP {
       const authUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize`;
       const tokenUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
 
-      // Scopes needed for SharePoint access
+      // Scopes that don't require admin consent
+      // Note: These provide limited access compared to Sites.Read.All
+      // - User.Read: Basic profile
+      // - Files.Read: Files you have access to (OneDrive + shared files)
+      // - offline_access: Allows refresh tokens
       const scopes = [
-        "Sites.Read.All",
-        "Files.Read.All",
+        "User.Read",
+        "Files.Read",
         "offline_access",
       ].join(" ");
 
