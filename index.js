@@ -7,7 +7,6 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
-import express from "express";
 import open from "open";
 
 // Default public Azure AD client ID (Microsoft Graph Explorer)
@@ -38,9 +37,6 @@ class SharePointMCP {
       siteUrl: null,
     };
 
-    // Track active auth server to prevent port conflicts
-    this.activeAuthServer = null;
-
     this.setupHandlers();
   }
 
@@ -51,7 +47,7 @@ class SharePointMCP {
         {
           name: "authenticate_sharepoint",
           description:
-            "Authenticate with SharePoint using OAuth 2.0. Opens a browser for user login and stores access token. No Azure AD setup required - uses default public client ID for testing!",
+            "Authenticate with SharePoint using OAuth 2.0 Device Code Flow. Shows a code to enter at microsoft.com/devicelogin. No Azure AD setup required - uses default public client ID for testing! No admin consent needed.",
           inputSchema: {
             type: "object",
             properties: {
@@ -62,11 +58,6 @@ class SharePointMCP {
               tenantId: {
                 type: "string",
                 description: "Azure AD Tenant ID (optional - uses 'common' if not provided, works for any Microsoft 365 account)",
-              },
-              redirectUri: {
-                type: "string",
-                description: "Redirect URI (default: http://localhost:3000/callback)",
-                default: "http://localhost:3000/callback",
               },
             },
             required: [],
@@ -208,73 +199,74 @@ class SharePointMCP {
     // Handle empty strings by treating them as undefined
     const clientId = args.clientId?.trim() || DEFAULT_CLIENT_ID;
     const tenantId = args.tenantId?.trim() || DEFAULT_TENANT_ID;
-    const redirectUri = args.redirectUri?.trim() || "http://localhost:3000/callback";
 
-    // Close any existing auth server first
-    if (this.activeAuthServer) {
-      console.error("Closing existing authentication server...");
-      try {
-        await new Promise((resolve) => {
-          this.activeAuthServer.close(() => resolve());
-        });
-        this.activeAuthServer = null;
-      } catch (err) {
-        console.error("Error closing existing server:", err.message);
-      }
-    }
+    // Use Device Code Flow - no redirect URI needed!
+    // This is perfect for local testing and CLI apps
+    const deviceCodeUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/devicecode`;
+    const tokenUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
 
-    return new Promise((resolve, reject) => {
-      const app = express();
-      let server;
+    // Scopes that don't require admin consent
+    const scopes = [
+      "User.Read",
+      "Files.Read",
+      "offline_access",
+    ].join(" ");
 
-      // OAuth endpoints
-      const authUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize`;
-      const tokenUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
-
-      // Scopes that don't require admin consent
-      // Note: These provide limited access compared to Sites.Read.All
-      // - User.Read: Basic profile
-      // - Files.Read: Files you have access to (OneDrive + shared files)
-      // - offline_access: Allows refresh tokens
-      const scopes = [
-        "User.Read",
-        "Files.Read",
-        "offline_access",
-      ].join(" ");
-
-      // Build authorization URL
-      const authParams = new URLSearchParams({
-        client_id: clientId,
-        response_type: "code",
-        redirect_uri: redirectUri,
-        scope: scopes,
-        response_mode: "query",
-      });
-
-      const fullAuthUrl = `${authUrl}?${authParams}`;
-
-      // Handle OAuth callback
-      app.get("/callback", async (req, res) => {
-        const { code, error } = req.query;
-
-        if (error) {
-          res.send(`<h1>Authentication failed: ${error}</h1>`);
-          server.close();
-          this.activeAuthServer = null;
-          reject(new Error(`Authentication failed: ${error}`));
-          return;
+    try {
+      // Step 1: Request device code
+      const deviceCodeResponse = await axios.post(
+        deviceCodeUrl,
+        new URLSearchParams({
+          client_id: clientId,
+          scope: scopes,
+        }),
+        {
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
         }
+      );
+
+      const {
+        device_code,
+        user_code,
+        verification_uri,
+        expires_in,
+        interval = 5,
+        message,
+      } = deviceCodeResponse.data;
+
+      console.error("\n=== SharePoint Authentication ===");
+      if (clientId === DEFAULT_CLIENT_ID) {
+        console.error("Using default public client ID (no Azure AD setup needed!)");
+      }
+      console.error("\nTo sign in, use a web browser to open the page:");
+      console.error(`  ${verification_uri}`);
+      console.error("\nAnd enter the code:");
+      console.error(`  ${user_code}`);
+      console.error("\nWaiting for you to authenticate...");
+      console.error("================================\n");
+
+      // Try to open the browser automatically
+      try {
+        await open(verification_uri);
+      } catch (err) {
+        // Silent fail - user can open manually
+      }
+
+      // Step 2: Poll for token
+      const pollUntil = Date.now() + expires_in * 1000;
+
+      while (Date.now() < pollUntil) {
+        await new Promise(resolve => setTimeout(resolve, interval * 1000));
 
         try {
-          // Exchange code for tokens
           const tokenResponse = await axios.post(
             tokenUrl,
             new URLSearchParams({
               client_id: clientId,
-              scope: scopes,
-              code: code,
-              redirect_uri: redirectUri,
-              grant_type: "authorization_code",
+              grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+              device_code: device_code,
             }),
             {
               headers: {
@@ -290,14 +282,7 @@ class SharePointMCP {
           this.authTokens.refreshToken = refresh_token;
           this.authTokens.expiresAt = Date.now() + expires_in * 1000;
 
-          res.send(`
-            <h1>Authentication Successful!</h1>
-            <p>You can close this window and return to your application.</p>
-            <script>setTimeout(() => window.close(), 2000);</script>
-          `);
-
-          server.close();
-          this.activeAuthServer = null;
+          console.error("\n✅ Authentication successful!\n");
 
           const successMessage = clientId === DEFAULT_CLIENT_ID
             ? "Successfully authenticated with SharePoint using default public client ID! 🎉\n\n" +
@@ -306,59 +291,41 @@ class SharePointMCP {
               "Example: https://yourtenant.sharepoint.com/sites/yoursite"
             : "Successfully authenticated with SharePoint! Access token stored. Use 'set_site_url' to specify your SharePoint site.";
 
-          resolve({
+          return {
             content: [
               {
                 type: "text",
                 text: successMessage,
               },
             ],
-          });
-        } catch (error) {
-          res.send(`<h1>Token exchange failed</h1>`);
-          server.close();
-          this.activeAuthServer = null;
-          reject(error);
-        }
-      });
+          };
+        } catch (pollError) {
+          // Check for specific errors
+          const errorCode = pollError.response?.data?.error;
 
-      // Start server with error handling
-      server = app.listen(3000, async () => {
-        this.activeAuthServer = server;
-        console.error("\n=== SharePoint Authentication ===");
-        if (clientId === DEFAULT_CLIENT_ID) {
-          console.error("Using default public client ID (no Azure AD setup needed!)");
+          if (errorCode === "authorization_pending") {
+            // User hasn't completed auth yet, continue polling
+            continue;
+          } else if (errorCode === "slow_down") {
+            // Need to slow down polling
+            await new Promise(resolve => setTimeout(resolve, interval * 1000));
+            continue;
+          } else if (errorCode === "authorization_declined") {
+            throw new Error("Authentication was declined by user");
+          } else if (errorCode === "expired_token") {
+            throw new Error("Authentication code expired. Please try again.");
+          } else {
+            // Unknown error, rethrow
+            throw pollError;
+          }
         }
-        console.error("Opening browser for Microsoft login...");
-        console.error("Login URL:", fullAuthUrl);
-        console.error("================================\n");
+      }
 
-        try {
-          await open(fullAuthUrl);
-        } catch (err) {
-          console.error("Could not open browser automatically. Please open this URL manually:");
-          console.error(fullAuthUrl);
-        }
-      });
-
-      // Handle server errors (like port already in use)
-      server.on('error', (err) => {
-        if (err.code === 'EADDRINUSE') {
-          reject(new Error('Port 3000 is already in use. Please close any other applications using this port and try again.'));
-        } else {
-          reject(err);
-        }
-      });
-
-      // Timeout after 5 minutes
-      setTimeout(() => {
-        if (server && server.listening) {
-          server.close();
-          this.activeAuthServer = null;
-        }
-        reject(new Error("Authentication timeout"));
-      }, 300000);
-    });
+      throw new Error("Authentication timeout - please try again");
+    } catch (error) {
+      const errorMessage = error.response?.data?.error_description || error.message;
+      throw new Error(`Authentication failed: ${errorMessage}`);
+    }
   }
 
   async setSiteUrl(args) {
