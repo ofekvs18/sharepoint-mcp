@@ -336,6 +336,28 @@ class SharePointMCP {
     }
   }
 
+  // Helper function to construct full file path from Graph API item
+  constructFullPath(item) {
+    if (!item.parentReference || !item.parentReference.path) {
+      // If no parent reference, return just the name (root level item)
+      return `/${item.name}`;
+    }
+
+    // parentReference.path format: "/drive/root:" or "/drive/root:/path/to/folder"
+    // We need to remove the "/drive/root:" prefix
+    let parentPath = item.parentReference.path.replace(/^\/drive\/root:?/, '');
+
+    // Ensure we don't have double slashes
+    if (!parentPath) {
+      parentPath = '';
+    }
+
+    // Construct full path
+    const fullPath = parentPath ? `${parentPath}/${item.name}` : `/${item.name}`;
+
+    return fullPath;
+  }
+
   async searchMyFiles(args) {
     await this.ensureAuthenticated();
 
@@ -360,7 +382,8 @@ class SharePointMCP {
       let allFiles = items.map((item) => ({
         id: item.id,
         name: item.name,
-        path: item.webUrl,
+        path: this.constructFullPath(item),
+        webUrl: item.webUrl,
         size: item.size,
         lastModified: item.lastModifiedDateTime,
         author: item.createdBy?.user?.displayName,
@@ -390,17 +413,22 @@ class SharePointMCP {
               item.name.toLowerCase().includes(query.toLowerCase())
             )
             .slice(0, Math.floor(maxResults / 2)) // Limit shared results
-            .map((item) => ({
-              id: item.remoteItem?.id || item.id,
-              name: item.name,
-              path: item.remoteItem?.webUrl || item.webUrl,
-              size: item.size,
-              lastModified: item.lastModifiedDateTime,
-              author: item.remoteItem?.createdBy?.user?.displayName,
-              type: item.folder || item.remoteItem?.folder ? "folder" : "file",
-              source: "sharedWithMe",
-              sharedBy: item.remoteItem?.createdBy?.user?.displayName,
-            }));
+            .map((item) => {
+              // For shared items, use remoteItem if available
+              const itemToUse = item.remoteItem || item;
+              return {
+                id: item.remoteItem?.id || item.id,
+                name: item.name,
+                path: this.constructFullPath(itemToUse),
+                webUrl: item.remoteItem?.webUrl || item.webUrl,
+                size: item.size,
+                lastModified: item.lastModifiedDateTime,
+                author: item.remoteItem?.createdBy?.user?.displayName,
+                type: item.folder || item.remoteItem?.folder ? "folder" : "file",
+                source: "sharedWithMe",
+                sharedBy: item.remoteItem?.createdBy?.user?.displayName,
+              };
+            });
 
           allFiles = [...allFiles, ...matchingShared];
         } catch (sharedError) {
@@ -458,6 +486,7 @@ class SharePointMCP {
       const files = items.map((item) => ({
         id: item.id,
         name: item.name,
+        path: this.constructFullPath(item),
         type: item.folder ? "folder" : "file",
         size: item.size,
         lastModified: item.lastModifiedDateTime,
@@ -544,6 +573,7 @@ class SharePointMCP {
         .map((item) => ({
           id: item.id,
           name: item.name,
+          path: this.constructFullPath(item),
           size: item.size,
           lastModified: item.lastModifiedDateTime,
           lastAccessed: item.lastAccessedDateTime,
@@ -591,16 +621,21 @@ class SharePointMCP {
       );
 
       const items = response.data.value || [];
-      const files = items.map((item) => ({
-        id: item.remoteItem?.id || item.id,
-        name: item.name,
-        type: item.folder || item.remoteItem?.folder ? "folder" : "file",
-        size: item.size,
-        lastModified: item.lastModifiedDateTime,
-        webUrl: item.remoteItem?.webUrl || item.webUrl,
-        sharedBy: item.remoteItem?.createdBy?.user?.displayName,
-        sharedDateTime: item.remoteItem?.shared?.sharedDateTime,
-      }));
+      const files = items.map((item) => {
+        // For shared items, use remoteItem if available for path construction
+        const itemToUse = item.remoteItem || item;
+        return {
+          id: item.remoteItem?.id || item.id,
+          name: item.name,
+          path: this.constructFullPath(itemToUse),
+          type: item.folder || item.remoteItem?.folder ? "folder" : "file",
+          size: item.size,
+          lastModified: item.lastModifiedDateTime,
+          webUrl: item.remoteItem?.webUrl || item.webUrl,
+          sharedBy: item.remoteItem?.createdBy?.user?.displayName,
+          sharedDateTime: item.remoteItem?.shared?.sharedDateTime,
+        };
+      });
 
       return {
         content: [
