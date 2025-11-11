@@ -123,13 +123,17 @@ class SharePointMCP {
         {
           name: "get_file_content",
           description:
-            "Retrieve the content of a specific file from your OneDrive",
+            "Retrieve the content of a specific file from your OneDrive or shared files",
           inputSchema: {
             type: "object",
             properties: {
               fileId: {
                 type: "string",
                 description: "File ID from search results",
+              },
+              driveId: {
+                type: "string",
+                description: "Drive ID (optional, required for shared files from other drives)",
               },
             },
             required: ["fileId"],
@@ -391,18 +395,26 @@ class SharePointMCP {
   }
 
   // Helper: Download and search file content
-  async searchFileContent(fileId, query) {
+  async searchFileContent(fileId, query, driveId = null) {
     try {
-      const response = await axios.get(
-        `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/content`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.authTokens.accessToken}`,
-          },
-          responseType: 'text',
-          maxContentLength: 10 * 1024 * 1024, // Limit to 10MB
-        }
-      );
+      // Construct the correct endpoint based on whether it's a shared file
+      let endpoint;
+      if (driveId) {
+        // Shared file - use drives/{driveId}/items/{itemId}
+        endpoint = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/content`;
+      } else {
+        // Regular file - use me/drive/items/{itemId}
+        endpoint = `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/content`;
+      }
+
+      const response = await axios.get(endpoint, {
+        headers: {
+          Authorization: `Bearer ${this.authTokens.accessToken}`,
+        },
+        responseType: 'text',
+        maxContentLength: 10 * 1024 * 1024, // Limit to 10MB
+        timeout: 30000, // 30 second timeout
+      });
 
       const content = response.data;
       const queryLower = query.toLowerCase();
@@ -434,7 +446,10 @@ class SharePointMCP {
 
       return { found: false };
     } catch (error) {
-      // If file is too large or binary, skip it
+      // If file is too large, binary, or inaccessible, skip it
+      if (error.response?.status === 404) {
+        return { found: false, error: 'File not found or inaccessible' };
+      }
       return { found: false, error: error.message };
     }
   }
@@ -568,11 +583,13 @@ class SharePointMCP {
       // For content search, check if file is searchable
       let contentMatch = null;
       if (this.isSearchableFile(fileName, fileTypes)) {
-        contentMatch = await this.searchFileContent(file.id, query);
+        // Pass driveId if available (for files from other drives)
+        const driveId = file.parentReference?.driveId;
+        contentMatch = await this.searchFileContent(file.id, query, driveId);
       }
 
       if (nameMatch || (contentMatch && contentMatch.found)) {
-        allResults.push({
+        const result = {
           id: file.id,
           name: fileName,
           path: this.constructFullPath(file),
@@ -585,7 +602,14 @@ class SharePointMCP {
           matchType: nameMatch && contentMatch?.found ? 'both' : (nameMatch ? 'filename' : 'content'),
           contentMatches: contentMatch?.matches || [],
           preview: contentMatch?.preview || '',
-        });
+        };
+
+        // Include driveId if it's from a different drive
+        if (driveId) {
+          result.driveId = driveId;
+        }
+
+        allResults.push(result);
 
         if (allResults.length >= maxResults) break;
       }
@@ -615,18 +639,20 @@ class SharePointMCP {
 
           const fileName = item.name;
           const fileId = item.remoteItem?.id || item.id;
+          const driveId = item.remoteItem?.parentReference?.driveId;
           const queryLower = query.toLowerCase();
 
           const nameMatch = fileName.toLowerCase().includes(queryLower);
 
           let contentMatch = null;
           if (this.isSearchableFile(fileName, fileTypes)) {
-            contentMatch = await this.searchFileContent(fileId, query);
+            // For shared files, we need to pass the driveId
+            contentMatch = await this.searchFileContent(fileId, query, driveId);
           }
 
           if (nameMatch || (contentMatch && contentMatch.found)) {
             const itemToUse = item.remoteItem || item;
-            allResults.push({
+            const result = {
               id: fileId,
               name: fileName,
               path: this.constructFullPath(itemToUse),
@@ -640,7 +666,14 @@ class SharePointMCP {
               matchType: nameMatch && contentMatch?.found ? 'both' : (nameMatch ? 'filename' : 'content'),
               contentMatches: contentMatch?.matches || [],
               preview: contentMatch?.preview || '',
-            });
+            };
+
+            // Include driveId for shared files
+            if (driveId) {
+              result.driveId = driveId;
+            }
+
+            allResults.push(result);
 
             if (allResults.length >= maxResults) break;
           }
@@ -851,22 +884,29 @@ class SharePointMCP {
   async getFileContent(args) {
     await this.ensureAuthenticated();
 
-    const { fileId } = args;
+    const { fileId, driveId } = args;
 
     if (!fileId) {
       throw new Error("fileId is required");
     }
 
     try {
-      const response = await axios.get(
-        `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/content`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.authTokens.accessToken}`,
-          },
-          responseType: "text",
-        }
-      );
+      // Construct the correct endpoint based on whether it's a shared file
+      let endpoint;
+      if (driveId) {
+        // Shared file - use drives/{driveId}/items/{itemId}
+        endpoint = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/content`;
+      } else {
+        // Regular file - use me/drive/items/{itemId}
+        endpoint = `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/content`;
+      }
+
+      const response = await axios.get(endpoint, {
+        headers: {
+          Authorization: `Bearer ${this.authTokens.accessToken}`,
+        },
+        responseType: "text",
+      });
 
       return {
         content: [
