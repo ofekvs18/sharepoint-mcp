@@ -10,6 +10,11 @@ import axios from "axios";
 import express from "express";
 import open from "open";
 
+// Default public Azure AD client ID (Microsoft Graph Explorer)
+// This allows testing without setting up your own Azure AD app
+const DEFAULT_CLIENT_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
+const DEFAULT_TENANT_ID = "common"; // Multi-tenant, works for any Microsoft 365 account
+
 // SharePoint MCP Server
 class SharePointMCP {
   constructor() {
@@ -43,17 +48,17 @@ class SharePointMCP {
         {
           name: "authenticate_sharepoint",
           description:
-            "Authenticate with SharePoint using OAuth 2.0. Opens a browser for user login and stores access token.",
+            "Authenticate with SharePoint using OAuth 2.0. Opens a browser for user login and stores access token. No Azure AD setup required - uses default public client ID for testing!",
           inputSchema: {
             type: "object",
             properties: {
               clientId: {
                 type: "string",
-                description: "Azure AD Application (client) ID",
+                description: "Azure AD Application (client) ID (optional - uses public default if not provided)",
               },
               tenantId: {
                 type: "string",
-                description: "Azure AD Tenant ID",
+                description: "Azure AD Tenant ID (optional - uses 'common' if not provided, works for any Microsoft 365 account)",
               },
               redirectUri: {
                 type: "string",
@@ -61,7 +66,7 @@ class SharePointMCP {
                 default: "http://localhost:3000/callback",
               },
             },
-            required: ["clientId", "tenantId"],
+            required: [],
           },
         },
         {
@@ -197,7 +202,11 @@ class SharePointMCP {
   }
 
   async authenticateSharePoint(args) {
-    const { clientId, tenantId, redirectUri = "http://localhost:3000/callback" } = args;
+    const {
+      clientId = DEFAULT_CLIENT_ID,
+      tenantId = DEFAULT_TENANT_ID,
+      redirectUri = "http://localhost:3000/callback"
+    } = args;
 
     return new Promise((resolve, reject) => {
       const app = express();
@@ -269,11 +278,18 @@ class SharePointMCP {
 
           server.close();
 
+          const successMessage = clientId === DEFAULT_CLIENT_ID
+            ? "Successfully authenticated with SharePoint using default public client ID! 🎉\n\n" +
+              "Access token stored in memory.\n\n" +
+              "Next step: Use 'set_site_url' to specify your SharePoint site URL.\n" +
+              "Example: https://yourtenant.sharepoint.com/sites/yoursite"
+            : "Successfully authenticated with SharePoint! Access token stored. Use 'set_site_url' to specify your SharePoint site.";
+
           resolve({
             content: [
               {
                 type: "text",
-                text: "Successfully authenticated with SharePoint! Access token stored. Use 'set_site_url' to specify your SharePoint site.",
+                text: successMessage,
               },
             ],
           });
@@ -286,7 +302,13 @@ class SharePointMCP {
 
       // Start server
       server = app.listen(3000, async () => {
-        console.log("Opening browser for authentication...");
+        console.error("\n=== SharePoint Authentication ===");
+        if (clientId === DEFAULT_CLIENT_ID) {
+          console.error("Using default public client ID (no Azure AD setup needed!)");
+        }
+        console.error("Opening browser for Microsoft login...");
+        console.error("Login URL:", fullAuthUrl);
+        console.error("================================\n");
         await open(fullAuthUrl);
       });
 

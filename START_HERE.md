@@ -13,10 +13,15 @@ Before starting, make sure you have:
 
 **Choose your path:**
 
-### 👤 I just want to use it (5 minutes)
+### ⚡ I just want to test it NOW (5 minutes, no Azure setup)
+**➡️ Read: [LOCAL_SETUP.md](./LOCAL_SETUP.md)** 🆕
+
+Test immediately using a public client ID. No Azure AD setup needed! Perfect for quick testing.
+
+### 👤 I want to use it properly (10-15 minutes)
 **➡️ Read: [QUICKSTART.md](./QUICKSTART.md)**
 
-This is the fastest path from zero to searching SharePoint through Claude.
+Full setup with your own Azure AD app. Better for regular use and production.
 
 ### 📚 I want to understand everything
 **➡️ Read in order:**
@@ -38,8 +43,27 @@ Step-by-step solutions for common issues.
 
 ⚠️ **Important:** Current version is NOT production-ready. See SECURITY.md for requirements.
 
-## ⚡ 5-Minute Setup (TL;DR)
+## ⚡ Super Quick Setup (TL;DR)
 
+### Option A: Test NOW (No Azure setup) 🆕
+```bash
+# 1. Install dependencies
+npm install
+
+# 2. Configure Claude Desktop config
+# Edit: ~/Library/Application Support/Claude/claude_desktop_config.json (macOS)
+# Or: %APPDATA%/Claude/claude_desktop_config.json (Windows)
+
+# 3. Restart Claude Desktop
+
+# 4. In Claude, say:
+"Authenticate with SharePoint"
+# No Client ID needed! Browser opens, you login, done.
+```
+
+Full details in [LOCAL_SETUP.md](./LOCAL_SETUP.md)
+
+### Option B: Full Setup (With your Azure AD app)
 ```bash
 # 1. Install dependencies
 npm install
@@ -50,14 +74,12 @@ npm install
 # Copy Client ID and Tenant ID
 
 # 3. Configure Claude Desktop
-# Edit: ~/Library/Application Support/Claude/claude_desktop_config.json (macOS)
-# Or: %APPDATA%/Claude/claude_desktop_config.json (Windows)
-# Add this MCP server configuration
+# Same as above
 
 # 4. Restart Claude Desktop
 
 # 5. In Claude, say:
-"Authenticate with SharePoint using my Client ID and Tenant ID"
+"Authenticate with SharePoint using Client ID: xxx and Tenant ID: yyy"
 ```
 
 Full details in [QUICKSTART.md](./QUICKSTART.md)
